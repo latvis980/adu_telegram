@@ -5,23 +5,30 @@ Cloudflare R2 Storage Module for Telegram Publisher
 Read-focused module for fetching articles and images from R2 storage,
 with archive functionality for moving sent articles.
 
-Folder Structure:
+UNIFIED Folder Structure:
     bucket/
     └── 2026/
         └── January/
             └── Week-4/
                 └── 2026-01-20/
-                    ├── candidates/
+                    ├── images/                    # Shared images (all services use this)
+                    │   ├── archdaily_001.jpg
+                    │   └── dezeen_002.jpg
+                    │
+                    ├── candidates/                # Pending articles for selection
                     │   ├── manifest.json
                     │   ├── archdaily_001.json
-                    │   └── images/
-                    │       └── archdaily_001.jpg
-                    ├── selected/
+                    │   └── archdaily_002.json
+                    │
+                    ├── selected/                  # After editorial selection
                     │   └── digest.json
-                    └── archive/
+                    │
+                    └── archive/                   # Sent articles (JSON only)
                         ├── archdaily_001.json
-                        └── images/
-                            └── archdaily_001.jpg
+                        └── dezeen_002.json
+
+Note: Images stay in the shared /images/ folder permanently.
+Only JSON files move from candidates/ to archive/ after sending.
 """
 
 import os
@@ -34,7 +41,7 @@ from botocore.exceptions import ClientError
 
 
 class R2Storage:
-    """Handles Cloudflare R2 storage operations."""
+    """Handles Cloudflare R2 storage operations (read-focused for Telegram)."""
 
     def __init__(
         self,
@@ -125,6 +132,22 @@ class R2Storage:
         base = self._get_base_path(target_date)
         return f"{base}/candidates/{source_id}_{index:03d}.json"
 
+    def _build_image_path(
+        self,
+        source_id: str,
+        index: int,
+        extension: str = "jpg",
+        target_date: Optional[date] = None
+    ) -> str:
+        """
+        Build path for article hero image.
+
+        IMPORTANT: Images are in shared /images/ folder at date level.
+        Format: YYYY/MonthName/Week-N/YYYY-MM-DD/images/source_NNN.ext
+        """
+        base = self._get_base_path(target_date)
+        return f"{base}/images/{source_id}_{index:03d}.{extension}"
+
     def _build_manifest_path(self, target_date: Optional[date] = None) -> str:
         """Build path for manifest file."""
         base = self._get_base_path(target_date)
@@ -144,17 +167,6 @@ class R2Storage:
         """Build path for archived article JSON."""
         base = self._get_base_path(target_date)
         return f"{base}/archive/{source_id}_{index:03d}.json"
-
-    def _build_archive_image_path(
-        self,
-        source_id: str,
-        index: int,
-        extension: str = "jpg",
-        target_date: Optional[date] = None
-    ) -> str:
-        """Build path for archived image."""
-        base = self._get_base_path(target_date)
-        return f"{base}/archive/images/{source_id}_{index:03d}.{extension}"
 
     # =========================================================================
     # Reading Methods
@@ -314,7 +326,25 @@ class R2Storage:
         return sorted(dates_found)
 
     # =========================================================================
-    # Archive Methods
+    # Image URL Helper
+    # =========================================================================
+
+    def get_image_public_url(self, r2_path: str) -> Optional[str]:
+        """
+        Get public URL for an image.
+
+        Args:
+            r2_path: Path to image in R2
+
+        Returns:
+            Public URL or None if no public URL configured
+        """
+        if not self.public_url or not r2_path:
+            return None
+        return f"{self.public_url.rstrip('/')}/{r2_path}"
+
+    # =========================================================================
+    # Archive Methods (Move sent articles)
     # =========================================================================
 
     def _copy_object(self, source_key: str, dest_key: str) -> bool:
@@ -377,16 +407,17 @@ class R2Storage:
     def archive_article(
         self,
         article_id: str,
-        target_date: Optional[date] = None,
-        include_image: bool = True
+        target_date: Optional[date] = None
     ) -> bool:
         """
-        Move an article from candidates/ to archive/.
+        Move an article JSON from candidates/ to archive/.
+
+        NOTE: Images stay in the shared /images/ folder - they are NOT moved.
+        Only the JSON file is archived.
 
         Args:
             article_id: Article ID (e.g., "archdaily_001")
             target_date: Target date (defaults to today)
-            include_image: Also move the associated image
 
         Returns:
             True if article was archived successfully
@@ -407,41 +438,18 @@ class R2Storage:
             print(f"   [ERROR] Invalid index in article_id: {article_id}")
             return False
 
-        # Build paths
+        # Build paths for JSON only (images stay in place)
         candidate_path = self._build_candidate_path(source_id, index, target_date)
         archive_path = self._build_archive_path(source_id, index, target_date)
 
         # Move the JSON file
         print(f"   [ARCHIVE] Moving {article_id} to archive...")
-        if not self._move_object(candidate_path, archive_path):
-            return False
-
-        # Move associated image if requested
-        if include_image:
-            # Try common image extensions
-            base = self._get_base_path(target_date)
-            for ext in ["jpg", "jpeg", "png", "webp", "gif"]:
-                image_source = f"{base}/candidates/images/{source_id}_{index:03d}.{ext}"
-                image_dest = f"{base}/archive/images/{source_id}_{index:03d}.{ext}"
-
-                # Check if image exists
-                try:
-                    self.client.head_object(Bucket=self.bucket_name, Key=image_source)
-                    # Image exists, move it
-                    self._move_object(image_source, image_dest)
-                    print(f"   [ARCHIVE] Moved image: {source_id}_{index:03d}.{ext}")
-                    break
-                except ClientError:
-                    # Image doesn't exist with this extension, try next
-                    continue
-
-        return True
+        return self._move_object(candidate_path, archive_path)
 
     def archive_articles(
         self,
         article_ids: List[str],
-        target_date: Optional[date] = None,
-        include_images: bool = True
+        target_date: Optional[date] = None
     ) -> Dict[str, bool]:
         """
         Archive multiple articles.
@@ -449,7 +457,6 @@ class R2Storage:
         Args:
             article_ids: List of article IDs to archive
             target_date: Target date (defaults to today)
-            include_images: Also move associated images
 
         Returns:
             Dict mapping article_id to success status
@@ -457,11 +464,7 @@ class R2Storage:
         results = {}
 
         for article_id in article_ids:
-            results[article_id] = self.archive_article(
-                article_id,
-                target_date,
-                include_images
-            )
+            results[article_id] = self.archive_article(article_id, target_date)
 
         return results
 
