@@ -1,0 +1,10 @@
+# requirements.txt - ADUmedia Telegram Publisher
+
+# Telegram
+python-telegram-bot>=21.0
+
+# Cloudflare R2 Storage (S3-compatible)
+boto3>=1.34.0
+
+# Async HTTP (for potential future enhancements)
+aiohttp>=3.9.0
