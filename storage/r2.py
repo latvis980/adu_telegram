@@ -2,7 +2,8 @@
 """
 Cloudflare R2 Storage Module for Telegram Publisher
 
-Read-focused module for fetching articles and images from R2 storage.
+Read-focused module for fetching articles and images from R2 storage,
+with archive functionality for moving sent articles.
 
 Folder Structure:
     bucket/
@@ -15,8 +16,12 @@ Folder Structure:
                     │   ├── archdaily_001.json
                     │   └── images/
                     │       └── archdaily_001.jpg
-                    └── selected/
-                        └── digest.json
+                    ├── selected/
+                    │   └── digest.json
+                    └── archive/
+                        ├── archdaily_001.json
+                        └── images/
+                            └── archdaily_001.jpg
 """
 
 import os
@@ -29,7 +34,7 @@ from botocore.exceptions import ClientError
 
 
 class R2Storage:
-    """Handles Cloudflare R2 storage operations (read-focused)."""
+    """Handles Cloudflare R2 storage operations."""
 
     def __init__(
         self,
@@ -41,7 +46,7 @@ class R2Storage:
     ):
         """
         Initialize R2 storage client.
-        
+
         Args:
             account_id: R2 account ID (or R2_ACCOUNT_ID env var)
             access_key_id: R2 access key (or R2_ACCESS_KEY_ID env var)
@@ -97,7 +102,7 @@ class R2Storage:
     def _get_base_path(self, target_date: Optional[date] = None) -> str:
         """
         Get base path for a date.
-        
+
         Format: YYYY/MonthName/Week-N/YYYY-MM-DD
         """
         if target_date is None:
@@ -130,6 +135,27 @@ class R2Storage:
         base = self._get_base_path(target_date)
         return f"{base}/selected/digest.json"
 
+    def _build_archive_path(
+        self,
+        source_id: str,
+        index: int,
+        target_date: Optional[date] = None
+    ) -> str:
+        """Build path for archived article JSON."""
+        base = self._get_base_path(target_date)
+        return f"{base}/archive/{source_id}_{index:03d}.json"
+
+    def _build_archive_image_path(
+        self,
+        source_id: str,
+        index: int,
+        extension: str = "jpg",
+        target_date: Optional[date] = None
+    ) -> str:
+        """Build path for archived image."""
+        base = self._get_base_path(target_date)
+        return f"{base}/archive/images/{source_id}_{index:03d}.{extension}"
+
     # =========================================================================
     # Reading Methods
     # =========================================================================
@@ -137,10 +163,10 @@ class R2Storage:
     def get_manifest(self, target_date: Optional[date] = None) -> Optional[dict]:
         """
         Retrieve manifest for a given date.
-        
+
         Args:
             target_date: Target date (defaults to today)
-            
+
         Returns:
             Manifest dict or None if not found
         """
@@ -165,11 +191,11 @@ class R2Storage:
     ) -> Optional[dict]:
         """
         Retrieve a single candidate article.
-        
+
         Args:
             article_id: Article ID (e.g., "archdaily_001")
             target_date: Target date (defaults to today)
-            
+
         Returns:
             Candidate dict or None if not found
         """
@@ -204,10 +230,10 @@ class R2Storage:
     ) -> List[dict]:
         """
         Retrieve all candidate articles for a given date.
-        
+
         Args:
             target_date: Target date (defaults to today)
-            
+
         Returns:
             List of candidate dicts
         """
@@ -231,10 +257,10 @@ class R2Storage:
     ) -> Optional[dict]:
         """
         Retrieve the selected digest for a given date.
-        
+
         Args:
             target_date: Target date (defaults to today)
-            
+
         Returns:
             Digest dict or None if not found
         """
@@ -255,19 +281,19 @@ class R2Storage:
     def list_dates_with_content(self, year: int, month: int) -> List[date]:
         """
         List all dates that have content for a given month.
-        
+
         Args:
             year: Year (e.g., 2026)
             month: Month number (1-12)
-            
+
         Returns:
             List of dates with content
         """
         month_name = date(year, month, 1).strftime("%B")
         prefix = f"{year}/{month_name}/"
-        
+
         dates_found = set()
-        
+
         try:
             paginator = self.client.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=self.bucket_name, Prefix=prefix):
@@ -284,8 +310,206 @@ class R2Storage:
                             pass
         except ClientError:
             pass
-        
+
         return sorted(dates_found)
+
+    # =========================================================================
+    # Archive Methods
+    # =========================================================================
+
+    def _copy_object(self, source_key: str, dest_key: str) -> bool:
+        """
+        Copy an object within the bucket.
+
+        Args:
+            source_key: Source object key
+            dest_key: Destination object key
+
+        Returns:
+            True if successful
+        """
+        try:
+            self.client.copy_object(
+                Bucket=self.bucket_name,
+                CopySource={"Bucket": self.bucket_name, "Key": source_key},
+                Key=dest_key
+            )
+            return True
+        except ClientError as e:
+            print(f"   [ERROR] Failed to copy {source_key}: {e}")
+            return False
+
+    def _delete_object(self, key: str) -> bool:
+        """
+        Delete an object from the bucket.
+
+        Args:
+            key: Object key to delete
+
+        Returns:
+            True if successful
+        """
+        try:
+            self.client.delete_object(
+                Bucket=self.bucket_name,
+                Key=key
+            )
+            return True
+        except ClientError as e:
+            print(f"   [ERROR] Failed to delete {key}: {e}")
+            return False
+
+    def _move_object(self, source_key: str, dest_key: str) -> bool:
+        """
+        Move an object (copy then delete).
+
+        Args:
+            source_key: Source object key
+            dest_key: Destination object key
+
+        Returns:
+            True if successful
+        """
+        if self._copy_object(source_key, dest_key):
+            return self._delete_object(source_key)
+        return False
+
+    def archive_article(
+        self,
+        article_id: str,
+        target_date: Optional[date] = None,
+        include_image: bool = True
+    ) -> bool:
+        """
+        Move an article from candidates/ to archive/.
+
+        Args:
+            article_id: Article ID (e.g., "archdaily_001")
+            target_date: Target date (defaults to today)
+            include_image: Also move the associated image
+
+        Returns:
+            True if article was archived successfully
+        """
+        if target_date is None:
+            target_date = date.today()
+
+        # Parse article_id
+        parts = article_id.rsplit("_", 1)
+        if len(parts) != 2:
+            print(f"   [ERROR] Invalid article_id format: {article_id}")
+            return False
+
+        source_id = parts[0]
+        try:
+            index = int(parts[1])
+        except ValueError:
+            print(f"   [ERROR] Invalid index in article_id: {article_id}")
+            return False
+
+        # Build paths
+        candidate_path = self._build_candidate_path(source_id, index, target_date)
+        archive_path = self._build_archive_path(source_id, index, target_date)
+
+        # Move the JSON file
+        print(f"   [ARCHIVE] Moving {article_id} to archive...")
+        if not self._move_object(candidate_path, archive_path):
+            return False
+
+        # Move associated image if requested
+        if include_image:
+            # Try common image extensions
+            base = self._get_base_path(target_date)
+            for ext in ["jpg", "jpeg", "png", "webp", "gif"]:
+                image_source = f"{base}/candidates/images/{source_id}_{index:03d}.{ext}"
+                image_dest = f"{base}/archive/images/{source_id}_{index:03d}.{ext}"
+
+                # Check if image exists
+                try:
+                    self.client.head_object(Bucket=self.bucket_name, Key=image_source)
+                    # Image exists, move it
+                    self._move_object(image_source, image_dest)
+                    print(f"   [ARCHIVE] Moved image: {source_id}_{index:03d}.{ext}")
+                    break
+                except ClientError:
+                    # Image doesn't exist with this extension, try next
+                    continue
+
+        return True
+
+    def archive_articles(
+        self,
+        article_ids: List[str],
+        target_date: Optional[date] = None,
+        include_images: bool = True
+    ) -> Dict[str, bool]:
+        """
+        Archive multiple articles.
+
+        Args:
+            article_ids: List of article IDs to archive
+            target_date: Target date (defaults to today)
+            include_images: Also move associated images
+
+        Returns:
+            Dict mapping article_id to success status
+        """
+        results = {}
+
+        for article_id in article_ids:
+            results[article_id] = self.archive_article(
+                article_id,
+                target_date,
+                include_images
+            )
+
+        return results
+
+    def update_manifest_after_archive(
+        self,
+        archived_ids: List[str],
+        target_date: Optional[date] = None
+    ) -> bool:
+        """
+        Update the manifest to remove archived articles.
+
+        Args:
+            archived_ids: List of article IDs that were archived
+            target_date: Target date (defaults to today)
+
+        Returns:
+            True if manifest was updated successfully
+        """
+        manifest = self.get_manifest(target_date)
+        if not manifest:
+            return False
+
+        # Filter out archived articles
+        original_count = len(manifest.get("candidates", []))
+        manifest["candidates"] = [
+            entry for entry in manifest.get("candidates", [])
+            if entry.get("id") not in archived_ids
+        ]
+
+        # Update counts
+        manifest["total_candidates"] = len(manifest["candidates"])
+        manifest["archived_count"] = manifest.get("archived_count", 0) + len(archived_ids)
+        manifest["last_archive_time"] = datetime.utcnow().isoformat() + "Z"
+
+        # Save updated manifest
+        path = self._build_manifest_path(target_date)
+        try:
+            self.client.put_object(
+                Bucket=self.bucket_name,
+                Key=path,
+                Body=json.dumps(manifest, indent=2),
+                ContentType="application/json"
+            )
+            print(f"   [MANIFEST] Updated: {original_count} -> {manifest['total_candidates']} candidates")
+            return True
+        except ClientError as e:
+            print(f"   [ERROR] Failed to update manifest: {e}")
+            return False
 
     # =========================================================================
     # Connection Testing
@@ -298,10 +522,10 @@ class R2Storage:
                 Bucket=self.bucket_name,
                 MaxKeys=1
             )
-            print(f"   ✅ R2 connected: bucket '{self.bucket_name}'")
+            print(f"   [OK] R2 connected: bucket '{self.bucket_name}'")
             if self.public_url:
-                print(f"   ✅ Public URL: {self.public_url}")
+                print(f"   [OK] Public URL: {self.public_url}")
             return True
         except ClientError as e:
-            print(f"   ❌ R2 connection failed: {e}")
+            print(f"   [ERROR] R2 connection failed: {e}")
             return False
