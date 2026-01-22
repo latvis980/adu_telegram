@@ -424,6 +424,7 @@ class TelegramBot:
 
         if hero_image:
             image_url = hero_image.get("r2_url") or hero_image.get("url")
+            print(f"   [DEBUG] Image URL: {image_url}")  # <-- ADD THIS LINE
 
         # Format the caption/message
         caption = self._format_article(article)

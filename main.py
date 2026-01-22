@@ -2,50 +2,70 @@
 """
 ADUmedia Telegram Publisher Service
 
-Standalone service that fetches today's articles from R2 storage,
-publishes them to the Telegram channel, and archives sent articles.
+Intelligent publishing service that:
+1. Determines edition type based on day of week
+2. Fetches candidates from R2 (single day or multiple days)
+3. Uses AI to select top 7 articles
+4. Tracks publications in Supabase for deduplication
+5. Sends digest to Telegram channel
+6. Archives sent articles
 
-Schedule: After RSS and Custom Scrapers complete (e.g., 19:00 Lisbon time)
-
-Pipeline:
-    1. Connect to R2 storage
-    2. Fetch today's candidates (or selected digest if available)
-    3. Format and send to Telegram channel
-    4. Archive sent articles (move from candidates/ to archive/)
+Schedule:
+    Monday    - Weekly Edition (covers full week)
+    Tuesday   - Weekend Catch-Up Edition (covers Sat, Sun, Mon)
+    Wednesday - Daily Edition
+    Thursday  - Daily Edition
+    Friday    - Daily Edition
+    Saturday  - No publication
+    Sunday    - No publication
 
 Usage:
-    python main.py              # Send today's articles
-    python main.py --test       # Test connections only
-    python main.py --date 2026-01-20  # Send specific date
-    python main.py --dry-run    # Fetch but don't send or archive
+    python main.py                    # Auto-detect edition type
+    python main.py --edition daily    # Force daily edition
+    python main.py --edition weekly   # Force weekly edition
+    python main.py --test             # Test connections only
+    python main.py --dry-run          # Fetch and select but don't send
 
-Environment Variables (set in Railway):
-    TELEGRAM_BOT_TOKEN      - Telegram bot token from BotFather
-    TELEGRAM_CHANNEL_ID     - Telegram channel ID (@channel or -100xxx)
+Environment Variables:
+    TELEGRAM_BOT_TOKEN      - Telegram bot token
+    TELEGRAM_CHANNEL_ID     - Telegram channel ID
     R2_ACCOUNT_ID           - Cloudflare R2 account ID
     R2_ACCESS_KEY_ID        - R2 access key
     R2_SECRET_ACCESS_KEY    - R2 secret key
-    R2_BUCKET_NAME          - R2 bucket name (adumedia)
-    R2_PUBLIC_URL           - R2 public URL (optional, for image URLs)
+    R2_BUCKET_NAME          - R2 bucket name
+    R2_PUBLIC_URL           - R2 public URL for images
+    SUPABASE_URL            - Supabase project URL
+    SUPABASE_KEY            - Supabase API key
+    OPENAI_API_KEY          - OpenAI API key for GPT-4o
+    LANGCHAIN_TRACING_V2    - Set to "true" for LangSmith tracing
+    LANGCHAIN_API_KEY       - LangSmith API key
+    LANGCHAIN_PROJECT       - LangSmith project name
 """
 
 import asyncio
 import argparse
 import os
-from datetime import datetime, date
-from typing import Optional, List
+from datetime import datetime, date, timedelta
+from typing import Optional, List, Dict, Any
 
 # Import modules
 from storage.r2 import R2Storage
 from telegram_bot import TelegramBot
+from editor.selector import (
+    ArticleSelector, 
+    EditionType, 
+    determine_edition_type,
+    get_edition_display_name
+)
+from editor.deduplication import DeduplicationChecker
+from database.connection import test_connection as test_db_connection
 
 
 # =============================================================================
 # Configuration
 # =============================================================================
 
-# Default: use today's date
-DEFAULT_DATE = None  # None means today
+ARTICLES_PER_EDITION = 7
 
 
 # =============================================================================
@@ -54,126 +74,91 @@ DEFAULT_DATE = None  # None means today
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="ADUmedia Telegram Publisher"
-    )
+    parser = argparse.ArgumentParser(description="ADUmedia Telegram Publisher")
 
     parser.add_argument(
-        "--test",
-        action="store_true",
-        help="Test connections only (R2 and Telegram)"
+        "--test", action="store_true",
+        help="Test connections only (R2, Telegram, Supabase, OpenAI)"
     )
-
     parser.add_argument(
-        "--date",
-        type=str,
-        default=None,
+        "--edition", type=str, choices=["daily", "weekend", "weekly"], default=None,
+        help="Force specific edition type (default: auto-detect from day)"
+    )
+    parser.add_argument(
+        "--date", type=str, default=None,
         help="Specific date to publish (YYYY-MM-DD format)"
     )
-
     parser.add_argument(
-        "--use-selected",
-        action="store_true",
-        default=False,
-        help="Use selected digest instead of all candidates"
+        "--dry-run", action="store_true",
+        help="Fetch and select articles but don't send to Telegram"
     )
-
     parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Fetch articles but don't send to Telegram or archive"
-    )
-
-    parser.add_argument(
-        "--no-archive",
-        action="store_true",
+        "--no-archive", action="store_true",
         help="Send to Telegram but don't archive articles"
     )
-
     parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Limit number of articles to send"
+        "--skip-selection", action="store_true",
+        help="Skip AI selection, use all candidates (for testing)"
     )
 
     return parser.parse_args()
 
 
 # =============================================================================
-# R2 Article Fetching
+# Date Range Helpers
 # =============================================================================
 
-def fetch_articles_from_r2(
-    r2: R2Storage,
-    target_date: Optional[date] = None,
-    use_selected: bool = False
-) -> List[dict]:
-    """
-    Fetch articles from R2 storage for the given date.
-
-    Args:
-        r2: R2Storage instance
-        target_date: Date to fetch (defaults to today)
-        use_selected: If True, use selected digest; otherwise use all candidates
-
-    Returns:
-        List of article dicts ready for Telegram
-    """
-    if target_date is None:
-        target_date = date.today()
-
-    print(f"\n[FETCH] Fetching articles for {target_date.isoformat()}...")
-
-    if use_selected:
-        # Try to get curated selection first
-        digest = r2.get_selected_digest(target_date)
-        if digest:
-            articles = digest.get("articles", [])
-            print(f"   [OK] Found selected digest: {len(articles)} articles")
-            return _prepare_articles_for_telegram(articles, r2)
-        else:
-            print("   [WARN] No selected digest found, falling back to candidates")
-
-    # Get all candidates
-    candidates = r2.get_all_candidates(target_date)
-
-    if not candidates:
-        # Fallback: try to get manifest and load manually
-        manifest = r2.get_manifest(target_date)
-        if manifest:
-            print(f"   [INFO] Found manifest with {manifest.get('total_candidates', 0)} candidates")
-            for entry in manifest.get("candidates", []):
-                article_id = entry.get("id")
-                if article_id:
-                    candidate = r2.get_candidate(article_id, target_date)
-                    if candidate:
-                        candidates.append(candidate)
-
-    print(f"   [OK] Found {len(candidates)} candidates")
-
-    return _prepare_articles_for_telegram(candidates, r2)
+def get_dates_for_edition(edition_type: EditionType, target_date: date) -> List[date]:
+    """Get the dates to fetch candidates for based on edition type."""
+    if edition_type == EditionType.DAILY:
+        return [target_date]
+    
+    elif edition_type == EditionType.WEEKEND:
+        # Weekend (Tuesday): Saturday, Sunday, Monday
+        monday = target_date - timedelta(days=1)
+        sunday = target_date - timedelta(days=2)
+        saturday = target_date - timedelta(days=3)
+        return [saturday, sunday, monday]
+    
+    elif edition_type == EditionType.WEEKLY:
+        # Weekly (Monday): previous 7 days
+        dates = []
+        for i in range(7, 0, -1):
+            dates.append(target_date - timedelta(days=i))
+        return dates
+    
+    return [target_date]
 
 
-def _prepare_articles_for_telegram(articles: List[dict], r2: R2Storage) -> List[dict]:
-    """
-    Prepare articles for Telegram sending.
+# =============================================================================
+# Candidate Fetching
+# =============================================================================
 
-    Ensures all required fields are present and formats hero_image URLs.
+def fetch_candidates_for_dates(r2: R2Storage, dates: List[date]) -> List[Dict[str, Any]]:
+    """Fetch all candidates from R2 for the given dates."""
+    all_candidates = []
+    
+    for target_date in dates:
+        print(f"   Fetching {target_date.isoformat()}...")
+        candidates = r2.get_all_candidates(target_date)
+        
+        for candidate in candidates:
+            candidate["_fetch_date"] = target_date.isoformat()
+        
+        all_candidates.extend(candidates)
+        print(f"      Found {len(candidates)} candidates")
+    
+    print(f"   [OK] Total candidates: {len(all_candidates)}")
+    return all_candidates
 
-    Args:
-        articles: Raw article dicts from R2
-        r2: R2Storage instance (for public URL)
 
-    Returns:
-        List of articles formatted for TelegramBot
-    """
+def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage) -> List[Dict[str, Any]]:
+    """Prepare selected articles for Telegram sending."""
     prepared = []
 
     for article in articles:
-        # Build telegram-ready article dict
         telegram_article = {
-            "id": article.get("id", ""),  # Keep ID for archiving
+            "id": article.get("id", ""),
             "title": article.get("title", ""),
             "link": article.get("link", ""),
             "ai_summary": article.get("ai_summary", ""),
@@ -181,17 +166,15 @@ def _prepare_articles_for_telegram(articles: List[dict], r2: R2Storage) -> List[
             "source_id": article.get("source_id", ""),
             "source_name": article.get("source_name", article.get("source_id", "Unknown")),
             "published": article.get("published"),
+            "_fetch_date": article.get("_fetch_date"),
         }
 
-        # Handle hero image
         image_info = article.get("image", {})
         if image_info.get("has_image") and image_info.get("r2_path"):
-            # Build public URL for the image
             r2_path = image_info["r2_path"]
             if r2.public_url:
                 image_url = f"{r2.public_url.rstrip('/')}/{r2_path}"
             else:
-                # Fallback to original URL if no public URL configured
                 image_url = image_info.get("original_url")
 
             telegram_article["hero_image"] = {
@@ -202,7 +185,6 @@ def _prepare_articles_for_telegram(articles: List[dict], r2: R2Storage) -> List[
         else:
             telegram_article["hero_image"] = None
 
-        # Only include articles with summaries
         if telegram_article["ai_summary"]:
             prepared.append(telegram_article)
         else:
@@ -212,50 +194,163 @@ def _prepare_articles_for_telegram(articles: List[dict], r2: R2Storage) -> List[
 
 
 # =============================================================================
+# Selection Pipeline
+# =============================================================================
+
+async def select_articles(
+    edition_type: EditionType,
+    candidates: List[Dict[str, Any]],
+    dedup: DeduplicationChecker,
+    target_date: date
+) -> List[Dict[str, Any]]:
+    """Use AI to select articles for the edition."""
+    print(f"\n[SELECT] AI selection for {edition_type.value} edition...")
+    
+    selector = ArticleSelector()
+    
+    # Get previously published URLs for deduplication
+    published_urls = dedup.get_published_urls(since_date=target_date - timedelta(days=90))
+    print(f"   Previously published: {len(published_urls)} articles")
+    
+    # Edition-specific data
+    weekly_article_urls = []
+    daily_published_this_week = []
+    recent_weekly_urls = []
+    
+    if edition_type == EditionType.WEEKEND:
+        monday = target_date - timedelta(days=1)
+        weekly_article_urls = dedup.get_weekly_edition_urls(monday)
+        print(f"   Weekly to exclude: {len(weekly_article_urls)} articles")
+    
+    elif edition_type == EditionType.WEEKLY:
+        week_end = target_date - timedelta(days=1)
+        daily_published_this_week = dedup.get_daily_editions_this_week(week_end)
+        print(f"   In daily editions: {len(daily_published_this_week)} articles")
+        recent_weekly_urls = dedup.get_recent_weekly_urls(days=30)
+        print(f"   Recent weekly: {len(recent_weekly_urls)} articles")
+    
+    # Run AI selection
+    selection = await selector.select(
+        edition_type=edition_type,
+        candidates=candidates,
+        published_urls=published_urls,
+        weekly_article_urls=weekly_article_urls,
+        daily_published_this_week=daily_published_this_week,
+        recent_weekly_urls=recent_weekly_urls,
+        target_date=target_date
+    )
+    
+    # Map selected IDs back to full candidate data
+    candidate_map = {c.get("id"): c for c in candidates}
+    selected_articles = []
+    
+    for item in selection.selected:
+        article_id = item.id
+        if article_id in candidate_map:
+            article = candidate_map[article_id].copy()
+            article["_selection_reason"] = item.reason
+            article["_selection_category"] = item.category
+            article["_weekly_candidate"] = item.weekly_candidate
+            article["_is_repeat"] = item.is_repeat
+            selected_articles.append(article)
+        else:
+            print(f"   [WARN] Selected article not found: {article_id}")
+    
+    print(f"\n[SELECT] Edition summary: {selection.edition_summary}")
+    print(f"[SELECT] Selected {len(selected_articles)} articles")
+    
+    return selected_articles
+
+
+# =============================================================================
+# Publication Recording
+# =============================================================================
+
+def record_publications(
+    dedup: DeduplicationChecker,
+    articles: List[Dict[str, Any]],
+    edition_type: EditionType,
+    edition_date: date,
+    total_candidates: int
+) -> List[str]:
+    """Record publications in database."""
+    print(f"\n[RECORD] Recording {len(articles)} publications...")
+    
+    article_ids = []
+    articles_new = 0
+    articles_repeated = 0
+    
+    for article in articles:
+        is_repeat = article.get("_is_repeat", False)
+        
+        article_id = dedup.record_publication(
+            article=article,
+            edition_type=edition_type.value,
+            edition_date=edition_date,
+            r2_path=article.get("image", {}).get("r2_path")
+        )
+        
+        if article_id:
+            article_ids.append(article_id)
+            
+            if is_repeat:
+                articles_repeated += 1
+            else:
+                articles_new += 1
+            
+            if edition_type == EditionType.DAILY and article.get("_weekly_candidate"):
+                week_start = edition_date - timedelta(days=edition_date.weekday())
+                dedup.flag_weekly_candidate(
+                    article_id=article_id,
+                    week_start=week_start,
+                    category=article.get("_selection_category"),
+                    notes=article.get("_selection_reason")
+                )
+    
+    dedup.record_edition(
+        edition_type=edition_type.value,
+        edition_date=edition_date,
+        article_ids=article_ids,
+        total_candidates=total_candidates,
+        articles_new=articles_new,
+        articles_repeated=articles_repeated
+    )
+    
+    print(f"   [OK] Recorded: {articles_new} new, {articles_repeated} repeated")
+    return article_ids
+
+
+# =============================================================================
 # Archive Logic
 # =============================================================================
 
-def archive_sent_articles(
-    r2: R2Storage,
-    sent_article_ids: List[str],
-    target_date: Optional[date] = None
-) -> dict:
-    """
-    Archive articles that were successfully sent to Telegram.
-
-    Args:
-        r2: R2Storage instance
-        sent_article_ids: List of article IDs that were sent
-        target_date: Target date (defaults to today)
-
-    Returns:
-        Dict with archive statistics
-    """
-    if not sent_article_ids:
-        return {"archived": 0, "failed": 0}
-
-    print(f"\n[ARCHIVE] Archiving {len(sent_article_ids)} sent articles...")
-
-    # Archive each article
-    results = r2.archive_articles(sent_article_ids, target_date)
-
-    archived_count = sum(1 for success in results.values() if success)
-    failed_count = len(results) - archived_count
-
-    # Update manifest to remove archived articles
-    if archived_count > 0:
-        r2.update_manifest_after_archive(
-            [aid for aid, success in results.items() if success],
-            target_date
-        )
-
-    print(f"   [OK] Archived: {archived_count}, Failed: {failed_count}")
-
-    return {
-        "archived": archived_count,
-        "failed": failed_count,
-        "details": results
-    }
+def archive_sent_articles(r2: R2Storage, articles: List[Dict[str, Any]]) -> Dict[str, bool]:
+    """Archive articles that were successfully sent."""
+    print(f"\n[ARCHIVE] Archiving {len(articles)} articles...")
+    
+    results = {}
+    
+    for article in articles:
+        article_id = article.get("id")
+        fetch_date_str = article.get("_fetch_date")
+        
+        if not article_id or not fetch_date_str:
+            continue
+        
+        try:
+            fetch_date = date.fromisoformat(fetch_date_str)
+        except ValueError:
+            print(f"   [WARN] Invalid date for {article_id}: {fetch_date_str}")
+            continue
+        
+        success = r2.archive_article(article_id, fetch_date)
+        results[article_id] = success
+    
+    archived = sum(1 for v in results.values() if v)
+    failed = len(results) - archived
+    
+    print(f"   [OK] Archived: {archived}, Failed: {failed}")
+    return results
 
 
 # =============================================================================
@@ -263,18 +358,12 @@ def archive_sent_articles(
 # =============================================================================
 
 async def test_connections() -> bool:
-    """
-    Test R2 and Telegram connections.
-
-    Returns:
-        True if all connections successful
-    """
+    """Test all service connections."""
     print("\n[TEST] Testing Connections...")
     print("=" * 50)
 
     all_ok = True
 
-    # Test R2
     print("\n1. Testing R2 Storage...")
     try:
         r2 = R2Storage()
@@ -284,7 +373,6 @@ async def test_connections() -> bool:
         print(f"   [ERROR] R2 connection failed: {e}")
         all_ok = False
 
-    # Test Telegram
     print("\n2. Testing Telegram Bot...")
     try:
         bot = TelegramBot()
@@ -295,6 +383,27 @@ async def test_connections() -> bool:
             all_ok = False
     except Exception as e:
         print(f"   [ERROR] Telegram connection failed: {e}")
+        all_ok = False
+
+    print("\n3. Testing Supabase Database...")
+    try:
+        if test_db_connection():
+            print("   [OK] Supabase connection OK")
+        else:
+            print("   [ERROR] Supabase connection failed")
+            all_ok = False
+    except Exception as e:
+        print(f"   [ERROR] Supabase connection failed: {e}")
+        all_ok = False
+
+    print("\n4. Testing OpenAI API...")
+    try:
+        from langchain_openai import ChatOpenAI
+        llm = ChatOpenAI(model="gpt-4o", max_tokens=10)
+        response = await llm.ainvoke([("human", "Say OK")])
+        print(f"   [OK] OpenAI connection OK")
+    except Exception as e:
+        print(f"   [ERROR] OpenAI connection failed: {e}")
         all_ok = False
 
     print("\n" + "=" * 50)
@@ -310,115 +419,120 @@ async def test_connections() -> bool:
 # Main Pipeline
 # =============================================================================
 
-async def run_telegram_publisher(
+async def run_publisher(
+    edition_type: Optional[EditionType] = None,
     target_date: Optional[date] = None,
-    use_selected: bool = False,
     dry_run: bool = False,
     no_archive: bool = False,
-    limit: Optional[int] = None,
+    skip_selection: bool = False,
 ):
-    """
-    Main Telegram publishing pipeline.
-
-    Args:
-        target_date: Date to publish (defaults to today)
-        use_selected: Use curated selection instead of all candidates
-        dry_run: Fetch but don't send or archive
-        no_archive: Send but don't archive
-        limit: Maximum number of articles to send
-    """
+    """Main publishing pipeline."""
     if target_date is None:
         target_date = date.today()
-
-    # Log pipeline start
+    
+    if edition_type is None:
+        edition_type = determine_edition_type(target_date)
+        
+        if edition_type is None:
+            print(f"\n[INFO] No publication scheduled for {target_date.strftime('%A')}")
+            print("[INFO] Use --edition flag to force a specific edition type")
+            return
+    
+    edition_name = get_edition_display_name(edition_type)
+    
     print(f"\n{'=' * 60}")
-    print("[START] ADUmedia Telegram Publisher")
+    print(f"[START] ADUmedia Telegram Publisher")
     print(f"{'=' * 60}")
     print(f"[INFO] {datetime.now().strftime('%B %d, %Y at %H:%M')}")
-    print(f"[INFO] Publishing date: {target_date.isoformat()}")
-    print(f"[INFO] Mode: {'Selected digest' if use_selected else 'All candidates'}")
+    print(f"[INFO] Edition: {edition_name}")
+    print(f"[INFO] Date: {target_date.isoformat()} ({target_date.strftime('%A')})")
     if dry_run:
-        print("[WARN] DRY RUN - No messages will be sent, no archiving")
+        print("[WARN] DRY RUN - No messages will be sent")
     if no_archive:
-        print("[WARN] NO ARCHIVE - Articles will not be archived after sending")
+        print("[WARN] NO ARCHIVE - Articles will not be archived")
+    if skip_selection:
+        print("[WARN] SKIP SELECTION - Using all candidates")
     print(f"{'=' * 60}")
 
     try:
-        # Initialize R2
-        print("\n[INIT] Connecting to R2 storage...")
+        print("\n[INIT] Connecting to services...")
         r2 = R2Storage()
         r2.test_connection()
-
-        # Fetch articles
-        articles = fetch_articles_from_r2(r2, target_date, use_selected)
-
-        if not articles:
-            print("\n[EMPTY] No articles found for this date. Exiting.")
+        
+        dedup = DeduplicationChecker()
+        
+        dates_to_fetch = get_dates_for_edition(edition_type, target_date)
+        print(f"\n[FETCH] Fetching candidates for {len(dates_to_fetch)} day(s)...")
+        
+        candidates = fetch_candidates_for_dates(r2, dates_to_fetch)
+        
+        if not candidates:
+            print("\n[EMPTY] No candidates found. Exiting.")
             return
-
-        # Apply limit if specified
-        if limit and len(articles) > limit:
-            print(f"\n[LIMIT] Limiting to {limit} articles (found {len(articles)})")
-            articles = articles[:limit]
-
-        print(f"\n[READY] Ready to publish {len(articles)} articles")
-
-        # Preview articles
+        
+        unpublished, already_published = dedup.filter_unpublished(candidates)
+        print(f"[DEDUP] After filtering: {len(unpublished)} unpublished, {len(already_published)} already published")
+        
+        if not unpublished:
+            print("\n[EMPTY] All candidates already published. Exiting.")
+            return
+        
+        if skip_selection:
+            selected = unpublished[:ARTICLES_PER_EDITION]
+            print(f"\n[SELECT] Using first {len(selected)} candidates (skipped AI)")
+        else:
+            selected = await select_articles(
+                edition_type=edition_type,
+                candidates=unpublished,
+                dedup=dedup,
+                target_date=target_date
+            )
+        
+        if not selected:
+            print("\n[EMPTY] No articles selected. Exiting.")
+            return
+        
+        articles = prepare_articles_for_telegram(selected, r2)
+        
+        print(f"\n[READY] {len(articles)} articles ready to publish")
+        
         print("\n[PREVIEW] Articles to publish:")
         for i, article in enumerate(articles, 1):
             has_image = "[IMG]" if article.get("hero_image") else "[TXT]"
             source = article.get("source_name", "Unknown")[:15]
             title = article.get("title", "No title")[:40]
             print(f"   {i}. {has_image} [{source}] {title}...")
-
+        
         if dry_run:
-            print("\n[DRY RUN] Complete. No messages sent, no archiving.")
+            print("\n[DRY RUN] Complete. No messages sent.")
             return
-
-        # Send to Telegram
+        
         print("\n[SEND] Sending to Telegram...")
         bot = TelegramBot()
-
+        
         results = await bot.send_digest(articles, include_header=True)
-
-        # Collect IDs of successfully sent articles
-        # Note: We track by index since send_digest processes in order
-        sent_article_ids = []
-
-        # For now, assume all articles in the sent count were successful
-        # A more robust implementation would track individual results
-        if results['sent'] > 0:
-            # Get IDs from the articles that were sent (minus header)
-            articles_sent = results['sent'] - 1  # Subtract header message
-            for article in articles[:articles_sent]:
-                article_id = article.get("id")
-                if article_id:
-                    sent_article_ids.append(article_id)
-
-        # Print Telegram results
+        
         print(f"\n{'=' * 60}")
         print("[TELEGRAM RESULTS]")
         print(f"{'=' * 60}")
         print(f"   [OK] Sent: {results['sent']}")
         print(f"   [ERROR] Failed: {results['failed']}")
         print(f"   [TIME] Duration: {results['total_time']/60:.1f} minutes")
-        if results.get('flood_retries', 0) > 0:
-            print(f"   [RETRY] Flood retries: {results['flood_retries']}")
-
-        # Archive sent articles
-        if not no_archive and sent_article_ids:
-            archive_results = archive_sent_articles(r2, sent_article_ids, target_date)
-
-            print(f"\n{'=' * 60}")
-            print("[ARCHIVE RESULTS]")
-            print(f"{'=' * 60}")
-            print(f"   [OK] Archived: {archive_results['archived']}")
-            print(f"   [ERROR] Failed: {archive_results['failed']}")
+        
+        if results['sent'] > 1:
+            article_ids = record_publications(
+                dedup=dedup,
+                articles=articles[:results['sent'] - 1],
+                edition_type=edition_type,
+                edition_date=target_date,
+                total_candidates=len(candidates)
+            )
+        
+        if not no_archive and results['sent'] > 1:
+            archive_sent_articles(r2, articles[:results['sent'] - 1])
         elif no_archive:
             print("\n[SKIP] Archiving skipped (--no-archive flag)")
-        else:
-            print("\n[SKIP] No articles to archive")
-
+        
         print(f"\n{'=' * 60}")
         print("[DONE] Pipeline complete!")
         print(f"{'=' * 60}")
@@ -436,7 +550,6 @@ async def main():
     """Main entry point."""
     args = parse_args()
 
-    # Validate environment
     required_vars = [
         "TELEGRAM_BOT_TOKEN",
         "TELEGRAM_CHANNEL_ID",
@@ -444,6 +557,9 @@ async def main():
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
         "R2_BUCKET_NAME",
+        "SUPABASE_URL",
+        "SUPABASE_KEY",
+        "OPENAI_API_KEY",
     ]
 
     missing = [var for var in required_vars if not os.getenv(var)]
@@ -452,12 +568,10 @@ async def main():
         print("Please set these in Railway dashboard.")
         return
 
-    # Test mode
     if args.test:
         await test_connections()
         return
 
-    # Parse date if provided
     target_date = None
     if args.date:
         try:
@@ -467,13 +581,21 @@ async def main():
             print("Use YYYY-MM-DD format (e.g., 2026-01-20)")
             return
 
-    # Run publisher
-    await run_telegram_publisher(
+    edition_type = None
+    if args.edition:
+        edition_map = {
+            "daily": EditionType.DAILY,
+            "weekend": EditionType.WEEKEND,
+            "weekly": EditionType.WEEKLY,
+        }
+        edition_type = edition_map.get(args.edition)
+
+    await run_publisher(
+        edition_type=edition_type,
         target_date=target_date,
-        use_selected=args.use_selected,
         dry_run=args.dry_run,
         no_archive=args.no_archive,
-        limit=args.limit,
+        skip_selection=args.skip_selection,
     )
 
 
