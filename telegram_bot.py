@@ -169,64 +169,46 @@ class TelegramBot:
                     return False
 
             except TelegramError as e:
-                # Other Telegram errors - don't retry
+                # Other Telegram errors
                 print(f"   [ERROR] Telegram error: {e}")
                 return False
 
-            except Exception as e:
-                # Unexpected error
-                print(f"   [ERROR] Unexpected error: {e}")
-                return False
-
-        # All retries exhausted
-        print(f"   [ERROR] Failed after {max_retries + 1} attempts. Last error: {last_error}")
+        # If we get here, all retries failed
+        print(f"   [ERROR] Failed after {max_retries + 1} attempts: {last_error}")
         return False
-
-    def get_flood_stats(self) -> dict:
-        """Get flood control statistics."""
-        return {
-            "messages_sent": self._message_count,
-            "retries": self._retry_count,
-            "total_flood_wait": self._flood_wait_total,
-        }
 
     def print_flood_stats(self) -> None:
         """Print flood control statistics."""
-        stats = self.get_flood_stats()
-        if stats["retries"] > 0:
-            print(f"   [FLOOD STATS] Messages: {stats['messages_sent']}, "
-                  f"Retries: {stats['retries']}, "
-                  f"Total wait: {stats['total_flood_wait']:.1f}s")
+        print(f"   Flood control stats:")
+        print(f"   - Messages sent: {self._message_count}")
+        print(f"   - Flood retries: {self._retry_count}")
+        print(f"   - Total flood wait: {self._flood_wait_total:.1f}s")
 
     # =========================================================================
-    # Message Escaping
+    # Markdown Escaping
     # =========================================================================
 
     @staticmethod
     def _escape_markdown(text: str) -> str:
         """
-        Escape special Markdown characters for Telegram.
+        Escape special characters in Markdown text.
 
-        Telegram's legacy Markdown mode uses these special characters:
-        - _ for italic
-        - * for bold
-        - ` for code
-        - [ for links
+        Telegram MarkdownV2 requires escaping: _*[]()~`>#+-=|{}.!
 
         Args:
-            text: Raw text to escape
+            text: Text to escape
 
         Returns:
-            Text with escaped Markdown characters
+            Escaped text safe for Telegram Markdown
         """
         if not text:
             return ""
 
-        # Characters that need escaping in Telegram Markdown
-        escape_chars = ['_', '*', '[', ']', '`']
+        # Characters that need escaping in MarkdownV2
+        special_chars = '_*[]()~`>#+-=|{}.!'
 
         result = text
-        for char in escape_chars:
+        for char in special_chars:
             result = result.replace(char, f'\\{char}')
 
         return result
@@ -350,8 +332,9 @@ class TelegramBot:
         Args:
             articles: List of article dicts with keys:
                 - link: Article URL
+                - headline: Article headline (PROJECT NAME / ARCHITECT)
                 - ai_summary: AI-generated summary
-                - tags: List of tags (optional)
+                - tag: Single tag (optional)
                 - hero_image: Dict with 'url' or 'r2_url' (optional)
             include_header: Whether to send daily header message
 
@@ -418,65 +401,40 @@ class TelegramBot:
         Returns:
             True if sent successfully
         """
-        # Get hero image URL (ONLY use R2 URLs to avoid external network issues)
-        hero_image = article.get("hero_image")
-        image_url: str | None = None
+        # Get image URL (prefer r2_url from R2 storage)
+        image_url = None
+        hero_image = article.get("hero_image") or article.get("image")
 
         if hero_image:
-            # ONLY use R2 URL - do not fallback to external URLs
-            image_url = hero_image.get("r2_url")
-            if image_url:
-                print(f"   [DEBUG] Using R2 image URL: {image_url}")
-            else:
-                print(f"   [WARN] No R2 URL available, will send text-only")
+            # Try r2_path first (this is the public URL path)
+            if hero_image.get("r2_path"):
+                # Build full public URL from R2 public URL + path
+                r2_storage = article.get("_r2_public_url")  # This might be passed separately
+                if r2_storage:
+                    image_url = f"{r2_storage.rstrip('/')}/{hero_image['r2_path']}"
+                else:
+                    # Fallback to constructing from path
+                    image_url = hero_image.get("r2_path")
+            # Fallback to direct URL
+            elif hero_image.get("url"):
+                image_url = hero_image["url"]
 
-        # Format the caption/message
+        # Format caption
         caption = self._format_article(article)
 
-        # Send with image if R2 URL is available
+        # Send with image if available
         if image_url:
-            success = await self.send_photo(image_url, caption)
-            if success:
-                return True
-            # Fallback to text-only if R2 image fails
-            print("   [WARN] R2 image failed, sending text only")
+            return await self.send_photo(image_url, caption)
+        else:
+            # Send as text message if no image
+            return await self.send_message(caption)
 
-        # Send as text message
-        return await self.send_message(caption, disable_preview=False)
-
-    async def send_single_article(self, article: dict) -> bool:
+    async def send_status(self, status: str) -> bool:
         """
-        Send a single article notification.
+        Send a status message to the channel.
 
         Args:
-            article: Article dict with link, ai_summary, tags
-
-        Returns:
-            True if sent successfully
-        """
-        return await self._send_article(article)
-
-    async def send_error_notification(self, error_message: str) -> bool:
-        """
-        Send an error notification to the channel (for monitoring).
-
-        Args:
-            error_message: Error description
-
-        Returns:
-            True if sent successfully
-        """
-        # Escape the error message to prevent Markdown issues
-        escaped_message = self._escape_markdown(error_message)
-        text = f"*System Alert*\n\n{escaped_message}"
-        return await self.send_message(text, disable_preview=True)
-
-    async def send_status_update(self, status: str) -> bool:
-        """
-        Send a status update (e.g., "Monitoring started").
-
-        Args:
-            status: Status message
+            status: Status message text
 
         Returns:
             True if sent successfully
@@ -502,54 +460,52 @@ class TelegramBot:
         Format single article message with proper Markdown escaping.
 
         Format:
+            PROJECT NAME / ARCHITECT
+
             Summary text here.
 
-            #tag1 #tag2
+            #tag1
 
             SourceName (linked)
         """
         url = article.get("link", "")
+        headline = article.get("headline", "")
         summary = article.get("ai_summary", "No summary available.")
-        tags = article.get("tags", [])
+        tag = article.get("tag", "")  # Single tag as string
 
         # Get source display name
         source_name = get_source_name(url)
 
-        # Escape special Markdown characters in summary
+        # Build message parts
+        message_parts = []
+
+        # 1. Add headline at the top (if available)
+        if headline:
+            escaped_headline = self._escape_markdown(headline)
+            message_parts.append(escaped_headline)
+
+        # 2. Add summary
         escaped_summary = self._escape_markdown(summary)
+        message_parts.append(escaped_summary)
 
-        # Build message - start with escaped summary
-        message = escaped_summary
+        # 3. Add tag (single tag)
+        if tag:
+            # Clean tag: lowercase, replace spaces with underscores
+            clean_tag = tag.strip().lower()
+            clean_tag = clean_tag.replace(" ", "_")
+            # Remove any remaining Markdown special chars from tag
+            clean_tag = re.sub(r'[_*\[\]`]', '', clean_tag)
+            if clean_tag:
+                message_parts.append(f"#{clean_tag}")
 
-        # Add tags if present
-        if tags:
-            if isinstance(tags, list):
-                # Clean tags: lowercase, replace spaces with underscores
-                cleaned_tags = []
-                for tag in tags:
-                    if tag:
-                        # Remove any special characters from tags
-                        clean_tag = tag.strip().lower()
-                        # Replace spaces with underscores
-                        clean_tag = clean_tag.replace(" ", "_")
-                        # Remove any remaining Markdown special chars from tag
-                        clean_tag = re.sub(r'[_*\[\]`]', '', clean_tag)
-                        if clean_tag:
-                            cleaned_tags.append(f"#{clean_tag}")
-                tags_str = " ".join(cleaned_tags)
-            else:
-                tags_str = str(tags)
-
-            if tags_str:
-                message += f"\n\n{tags_str}"
-
-        # Add source link with escaped source name and URL
+        # 4. Add source link with escaped source name and URL
         if url:
             escaped_source = self._escape_markdown(source_name)
             escaped_url = self._escape_url(url)
-            message += f"\n\n[{escaped_source}]({escaped_url})"
+            message_parts.append(f"[{escaped_source}]({escaped_url})")
 
-        return message
+        # Join all parts with double newlines
+        return "\n\n".join(message_parts)
 
     # =========================================================================
     # Connection Testing
