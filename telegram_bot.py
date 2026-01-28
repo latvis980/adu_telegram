@@ -239,7 +239,7 @@ class TelegramBot:
     async def send_message(
         self, 
         text: str, 
-        parse_mode: str = ParseMode.MARKDOWN,
+        parse_mode: str = ParseMode.HTML,  # Changed from MARKDOWN
         disable_preview: bool = False
     ) -> bool:
         """
@@ -456,55 +456,33 @@ class TelegramBot:
         )
 
     def _format_article(self, article: dict) -> str:
-        """
-        Format single article message with proper Markdown escaping.
-
-        Format:
-            PROJECT NAME / ARCHITECT
-
-            Summary text here.
-
-            #tag1
-
-            SourceName (linked)
-        """
+        """Format single article message in HTML."""
         url = article.get("link", "")
         headline = article.get("headline", "")
         summary = article.get("ai_summary", "No summary available.")
-        tag = article.get("tag", "")  # Single tag as string
+        tag = article.get("tag", "")
 
-        # Get source display name
         source_name = get_source_name(url)
 
-        # Build message parts
         message_parts = []
 
-        # 1. Add headline at the top (if available)
         if headline:
-            escaped_headline = self._escape_markdown(headline)
-            message_parts.append(escaped_headline)
+            # Bold headline in HTML
+            message_parts.append(f"<b>{headline}</b>")
 
-        # 2. Add summary
-        escaped_summary = self._escape_markdown(summary)
-        message_parts.append(escaped_summary)
+        # Plain text summary
+        message_parts.append(summary)
 
-        # 3. Add tag (single tag)
         if tag:
-            # Clean tag: lowercase, replace spaces with underscores
-            clean_tag = tag.strip().lower()
-            clean_tag = clean_tag.replace(" ", "_")
-            # Remove any remaining Markdown special chars from tag
-            clean_tag = re.sub(r'[_*\[\]`]', '', clean_tag)
+            clean_tag = tag.strip().lower().replace(" ", "_")
+            clean_tag = re.sub(r'[^a-z0-9_]', '', clean_tag)
             if clean_tag:
                 message_parts.append(f"#{clean_tag}")
 
-        # 4. Add source link with escaped source name and URL
         if url:
-            escaped_source = self._escape_markdown(source_name)
-            escaped_url = self._escape_url(url)
-            message_parts.append(f"[{escaped_source}]({escaped_url})")
+            # HTML link format
+            message_parts.append(f'<a href="{url}">{source_name}</a>')
 
-        # Join all parts with double newlines
         return "\n\n".join(message_parts)
 
     # =========================================================================
@@ -530,7 +508,6 @@ class TelegramBot:
         except TelegramError as e:
             print(f"[ERROR] Connection test failed: {e}")
             return False
-
 
 # =============================================================================
 # Convenience Functions

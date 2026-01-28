@@ -287,8 +287,6 @@ async def select_articles(
 
     return selected_articles
 
-
-# Replace the prepare_articles_for_telegram function in main.py
 def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage) -> List[Dict[str, Any]]:
     """Prepare selected articles for Telegram sending."""
     prepared = []
@@ -312,18 +310,32 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
         image_info = article.get("image", {})
         if image_info and image_info.get("has_image") and image_info.get("r2_path"):
             r2_path = image_info["r2_path"]
-            if r2.public_url:
-                # Always construct the R2 URL
-                image_url = f"{r2.public_url.rstrip('/')}/{r2_path}"
-                telegram_article["hero_image"] = {
-                    "url": image_info.get("original_url"),
-                    "r2_url": image_url,
-                    "r2_path": r2_path,
-                }
-                print(f"   [DEBUG] Image URL constructed: {image_url}")
-            else:
-                print(f"   [WARN] No R2 public URL configured for: {telegram_article['title'][:40]}...")
+
+            # CRITICAL FIX: Check if R2 public URL is configured
+            if not r2.public_url:
+                print(f"   [ERROR] R2_PUBLIC_URL not configured! Cannot generate image URLs.")
                 telegram_article["hero_image"] = None
+            else:
+                # Clean the path - remove leading slash if present
+                clean_path = r2_path.lstrip('/')
+
+                # Construct full public URL
+                image_url = f"{r2.public_url.rstrip('/')}/{clean_path}"
+
+                # VALIDATE URL before adding
+                if not image_url.startswith(('http://', 'https://')):
+                    print(f"   [ERROR] Invalid URL (no protocol): {image_url}")
+                    telegram_article["hero_image"] = None
+                elif '//' in image_url.replace('://', ''):  # Double slash check
+                    print(f"   [ERROR] Malformed URL (double slash): {image_url}")
+                    telegram_article["hero_image"] = None
+                else:
+                    print(f"   [DEBUG] Image URL: {image_url}")
+                    telegram_article["hero_image"] = {
+                        "url": image_info.get("original_url"),
+                        "r2_url": image_url,
+                        "r2_path": r2_path,
+                    }
         else:
             telegram_article["hero_image"] = None
 
@@ -333,7 +345,6 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
             print(f"   [WARN] Skipping article without summary: {telegram_article['title'][:40]}...")
 
     return prepared
-
 
 # =============================================================================
 # Publication Recording
