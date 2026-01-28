@@ -418,24 +418,28 @@ class TelegramBot:
         Returns:
             True if sent successfully
         """
-        # Get hero image URL (prefer R2, fallback to original)
+        # Get hero image URL (ONLY use R2 URLs to avoid external network issues)
         hero_image = article.get("hero_image")
         image_url: str | None = None
 
         if hero_image:
-            image_url = hero_image.get("r2_url") or hero_image.get("url")
-            print(f"   [DEBUG] Image URL: {image_url}")  # <-- ADD THIS LINE
+            # ONLY use R2 URL - do not fallback to external URLs
+            image_url = hero_image.get("r2_url")
+            if image_url:
+                print(f"   [DEBUG] Using R2 image URL: {image_url}")
+            else:
+                print(f"   [WARN] No R2 URL available, will send text-only")
 
         # Format the caption/message
         caption = self._format_article(article)
 
-        # Send with image if available
+        # Send with image if R2 URL is available
         if image_url:
             success = await self.send_photo(image_url, caption)
             if success:
                 return True
-            # Fallback to text-only if image fails
-            print("   [WARN] Image failed, sending text only")
+            # Fallback to text-only if R2 image fails
+            print("   [WARN] R2 image failed, sending text only")
 
         # Send as text message
         return await self.send_message(caption, disable_preview=False)
