@@ -288,6 +288,7 @@ async def select_articles(
     return selected_articles
 
 
+# Replace the prepare_articles_for_telegram function in main.py
 def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage) -> List[Dict[str, Any]]:
     """Prepare selected articles for Telegram sending."""
     prepared = []
@@ -312,15 +313,16 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
         if image_info and image_info.get("has_image") and image_info.get("r2_path"):
             r2_path = image_info["r2_path"]
             if r2.public_url:
+                # Always construct the R2 URL
                 image_url = f"{r2.public_url.rstrip('/')}/{r2_path}"
                 telegram_article["hero_image"] = {
                     "url": image_info.get("original_url"),
                     "r2_url": image_url,
                     "r2_path": r2_path,
                 }
+                print(f"   [DEBUG] Image URL constructed: {image_url}")
             else:
-                # No public R2 URL configured - don't include image to avoid external URLs
-                print(f"   [WARN] No R2 public URL configured, skipping image for: {telegram_article['title'][:40]}...")
+                print(f"   [WARN] No R2 public URL configured for: {telegram_article['title'][:40]}...")
                 telegram_article["hero_image"] = None
         else:
             telegram_article["hero_image"] = None
