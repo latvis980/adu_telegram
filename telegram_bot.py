@@ -451,10 +451,10 @@ class TelegramBot:
     # =========================================================================
 
     def _format_header(self, article_count: int) -> str:
-        """Format digest header message in plain text."""
+        """Format digest header message in HTML."""
         today = datetime.now().strftime("%d %B %Y")
         return (
-            f"{today}\n"
+            f"<b>{today}</b>\n"
             f"Our editorial selection for today."
         )
 
