@@ -294,10 +294,12 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
     for article in articles:
         telegram_article = {
             "id": article.get("id", ""),
-            "title": article.get("title", ""),
+            "title": article.get("title", ""),  # Keep for logging
+            "headline": article.get("headline", ""),  # CRITICAL: This is what Telegram uses
+            "tag": article.get("tag", ""),  # CRITICAL: Single tag for Telegram
             "link": article.get("link", ""),
             "ai_summary": article.get("ai_summary", ""),
-            "tags": article.get("tags", []),
+            "tags": article.get("tags", []),  # Keep for metadata
             "source_id": article.get("source_id", ""),
             "source_name": article.get("source_name", article.get("source_id", "Unknown")),
             "published": article.get("published"),
@@ -333,16 +335,22 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
                     print(f"   [DEBUG] Image URL: {image_url}")
                     telegram_article["hero_image"] = {
                         "url": image_info.get("original_url"),
-                        "r2_url": image_url,
+                        "r2_url": image_url,  # This is the full public URL
                         "r2_path": r2_path,
                     }
         else:
             telegram_article["hero_image"] = None
 
-        if telegram_article["ai_summary"]:
-            prepared.append(telegram_article)
-        else:
+        # Validate required fields before adding
+        if not telegram_article["ai_summary"]:
             print(f"   [WARN] Skipping article without summary: {telegram_article['title'][:40]}...")
+            continue
+
+        if not telegram_article["headline"]:
+            print(f"   [WARN] Skipping article without headline: {telegram_article['title'][:40]}...")
+            continue
+
+        prepared.append(telegram_article)
 
     return prepared
 

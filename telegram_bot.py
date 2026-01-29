@@ -396,34 +396,38 @@ class TelegramBot:
         Send a single article - with image if available.
 
         Args:
-            article: Article dict
+            article: Article dict with:
+                - hero_image: Dict with 'r2_url' (preferred) or 'url' or 'r2_path'
+                - headline: Article headline (not 'title')
+                - ai_summary: Summary text
+                - tag: Single tag
+                - link: Article URL
 
         Returns:
             True if sent successfully
         """
-        # Get image URL (prefer r2_url from R2 storage)
+        # Get image URL - prefer r2_url (already constructed full URL)
         image_url = None
         hero_image = article.get("hero_image") or article.get("image")
 
         if hero_image:
-            # Try r2_path first (this is the public URL path)
-            if hero_image.get("r2_path"):
-                # Build full public URL from R2 public URL + path
-                r2_storage = article.get("_r2_public_url")  # This might be passed separately
-                if r2_storage:
-                    image_url = f"{r2_storage.rstrip('/')}/{hero_image['r2_path']}"
-                else:
-                    # Fallback to constructing from path
-                    image_url = hero_image.get("r2_path")
-            # Fallback to direct URL
+            # Priority 1: r2_url (full URL already constructed)
+            if hero_image.get("r2_url"):
+                image_url = hero_image["r2_url"]
+            # Priority 2: original URL
             elif hero_image.get("url"):
                 image_url = hero_image["url"]
+            # Priority 3: r2_path (shouldn't happen if prepare_articles_for_telegram ran)
+            elif hero_image.get("r2_path"):
+                print(f"   [WARN] Using r2_path without base URL - this may fail")
+                image_url = hero_image["r2_path"]
 
         # Format caption
         caption = self._format_article(article)
 
         # Send with image if available
         if image_url:
+            print(f"   [DEBUG] Sending image: {image_url[:80]}...")
             return await self.send_photo(image_url, caption)
         else:
             # Send as text message if no image
@@ -501,10 +505,6 @@ class TelegramBot:
 
         # Join with single newlines (empty strings create the blank lines)
         return "\n".join(message_parts)
-
-    # =========================================================================
-    # Connection Testing
-    # =========================================================================
 
     # =========================================================================
     # Connection Testing
