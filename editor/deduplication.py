@@ -668,6 +668,120 @@ Don't match if: different buildings by same architect, or same name but differen
         except Exception as e:
             print(f"[DEDUP] Error getting published project IDs: {e}")
             return set()
+
+    def get_daily_published_for_weekly(
+        self,
+        week_start: date,
+        week_end: date
+    ) -> List[Dict[str, str]]:
+        """
+        Get articles published in daily editions for the weekly edition.
+
+        This helps the Weekly AI know which articles were already shown
+        in Wed/Thu/Fri daily editions, so it can mark them as "repeats"
+        vs "new" discoveries.
+
+        Args:
+            week_start: Start of the week (Monday)
+            week_end: End of the week (Sunday)
+
+        Returns:
+            List of dicts with: url, title, date, edition_type
+        """
+        try:
+            # Query all_articles that were published in daily editions during this week
+            result = self.client.table("all_articles")\
+                .select("article_url, original_title, fetch_date, selected_for_editions")\
+                .gte("fetch_date", week_start.isoformat())\
+                .lte("fetch_date", week_end.isoformat())\
+                .eq("status", "published")\
+                .execute()
+
+            daily_articles = []
+            for row in result.data:
+                editions = row.get("selected_for_editions") or []
+                # Only include if it was in a daily edition
+                if "daily" in editions:
+                    daily_articles.append({
+                        "url": row.get("article_url", ""),
+                        "title": row.get("original_title", ""),
+                        "date": row.get("fetch_date", ""),
+                    })
+
+            print(f"[DEDUP] Found {len(daily_articles)} daily-published articles for weekly")
+            return daily_articles
+
+        except Exception as e:
+            print(f"[DEDUP] Error getting daily published for weekly: {e}")
+            return []
+
+    def save_weekly_candidates(
+        self,
+        article_ids: List[str],
+        week_start_date: date,
+        categories: Optional[Dict[str, str]] = None
+    ) -> int:
+        """
+        Save articles flagged as weekly candidates.
+
+        Called after daily selection when AI marks articles with weekly_candidate=true.
+
+        Args:
+            article_ids: List of article UUIDs to flag
+            week_start_date: Monday of the week
+            categories: Optional dict mapping article_id to category
+
+        Returns:
+            Number of candidates saved
+        """
+        saved = 0
+        categories = categories or {}
+
+        for article_id in article_ids:
+            try:
+                data = {
+                    "article_id": article_id,
+                    "week_start_date": week_start_date.isoformat(),
+                    "category": categories.get(article_id),
+                    "is_selected": False,
+                }
+
+                self.client.table("weekly_candidates")\
+                    .insert(data)\
+                    .execute()
+
+                saved += 1
+            except Exception as e:
+                # Might be duplicate, ignore
+                print(f"[DEDUP] Failed to save weekly candidate {article_id}: {e}")
+
+        print(f"[DEDUP] Saved {saved} weekly candidates for week of {week_start_date}")
+        return saved
+
+    def get_weekly_candidates(
+        self,
+        week_start_date: date
+    ) -> List[str]:
+        """
+        Get article IDs flagged as weekly candidates for a given week.
+
+        Args:
+            week_start_date: Monday of the week
+
+        Returns:
+            List of article UUIDs
+        """
+        try:
+            result = self.client.table("weekly_candidates")\
+                .select("article_id")\
+                .eq("week_start_date", week_start_date.isoformat())\
+                .eq("is_selected", False)\
+                .execute()
+
+            return [row["article_id"] for row in result.data]
+        except Exception as e:
+            print(f"[DEDUP] Error getting weekly candidates: {e}")
+            return []
     
     def record_edition(
         self,

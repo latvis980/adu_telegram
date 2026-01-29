@@ -18,8 +18,8 @@ The AI matching handles:
 - Location variations ("NYC" vs "New York")
 
 Schedule:
-    Monday    - Weekly Edition (covers full week)
-    Tuesday   - Weekend Catch-Up Edition (covers Sat, Sun, Mon)
+    Monday    - Weekly Edition (covers full week, Mon-Sun)
+    Tuesday   - Weekend Catch-Up Edition (covers Sat, Sun, Mon - no daily editions)
     Wednesday - Daily Edition
     Thursday  - Daily Edition
     Friday    - Daily Edition
@@ -96,10 +96,6 @@ def parse_args():
         help="Don't send to Telegram"
     )
     parser.add_argument(
-        "--no-archive", action="store_true",
-        help="Don't archive articles"
-    )
-    parser.add_argument(
         "--skip-selection", action="store_true",
         help="Skip AI selection"
     )
@@ -116,12 +112,22 @@ def parse_args():
 # =============================================================================
 
 def get_dates_for_edition(edition_type: EditionType, target_date: date) -> List[date]:
-    """Get the dates to fetch candidates for based on edition type."""
+    """
+    Get the dates to fetch candidates for based on edition type.
+
+    Schedule:
+    - Daily (Wed/Thu/Fri): Same day only
+    - Weekend (Tuesday): Sat, Sun, Mon (3 days with no daily editions)
+    - Weekly (Monday): Previous 7 days (Mon-Sun)
+    """
     if edition_type == EditionType.DAILY:
+        # Same day
         return [target_date]
     elif edition_type == EditionType.WEEKEND:
+        # Tuesday covers: Saturday (-3), Sunday (-2), Monday (-1)
         return [target_date - timedelta(days=i) for i in range(3, 0, -1)]
     elif edition_type == EditionType.WEEKLY:
+        # Monday covers: Previous Mon-Sun (days -7 to -1)
         return [target_date - timedelta(days=i) for i in range(7, 0, -1)]
     return [target_date]
 
@@ -256,13 +262,23 @@ async def select_articles(
         if project_id and project_id in published_projects:
             candidate["_recently_published"] = True
 
-    # Run AI selection (using existing selector)
+    # Get cross-edition data for Weekly edition
+    daily_published_this_week = []
+    if edition_type == EditionType.WEEKLY:
+        daily_published_this_week = dedup.get_daily_published_for_weekly(
+            week_start=target_date - timedelta(days=7),
+            week_end=target_date - timedelta(days=1)
+        )
+        print(f"   Daily published this week: {len(daily_published_this_week)}")
+
+    # Run AI selection
     published_urls = []  # We use project-based dedup now
 
     selection = await selector.select(
         edition_type=edition_type,
         candidates=candidates,
         published_urls=published_urls,
+        daily_published_this_week=daily_published_this_week,
         target_date=target_date
     )
 
@@ -286,6 +302,7 @@ async def select_articles(
     print(f"[SELECT] Selected {len(selected_articles)} articles")
 
     return selected_articles
+
 
 def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage) -> List[Dict[str, Any]]:
     """Prepare selected articles for Telegram sending."""
@@ -353,6 +370,7 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
         prepared.append(telegram_article)
 
     return prepared
+
 
 # =============================================================================
 # Publication Recording
@@ -422,36 +440,6 @@ def record_publications(
 
 
 # =============================================================================
-# Archive Logic
-# =============================================================================
-
-def archive_sent_articles(r2: R2Storage, articles: List[Dict[str, Any]]) -> Dict[str, bool]:
-    """Archive articles that were successfully sent."""
-    print(f"\n[ARCHIVE] Archiving {len(articles)} articles...")
-
-    results = {}
-
-    for article in articles:
-        article_id = article.get("id")
-        fetch_date_str = article.get("_fetch_date")
-
-        if not article_id or not fetch_date_str:
-            continue
-
-        try:
-            fetch_date = date.fromisoformat(fetch_date_str)
-        except ValueError:
-            continue
-
-        success = r2.archive_article(article_id, fetch_date)
-        results[article_id] = success
-
-    archived = sum(1 for v in results.values() if v)
-    print(f"   [OK] Archived: {archived}/{len(results)}")
-    return results
-
-
-# =============================================================================
 # Connection Testing
 # =============================================================================
 
@@ -515,7 +503,6 @@ async def run_publisher(
     edition_type: Optional[EditionType] = None,
     target_date: Optional[date] = None,
     dry_run: bool = False,
-    no_archive: bool = False,
     skip_selection: bool = False,
     skip_extraction: bool = False,
 ):
@@ -605,16 +592,12 @@ async def run_publisher(
 
         print(f"\n[RESULT] Sent: {results['sent']}, Failed: {results['failed']}")
 
-        # Record publications
+        # Record publications (no archiving - files stay in place)
         if results['sent'] > 1:
             record_publications(
                 dedup, articles[:results['sent'] - 1],
                 edition_type, target_date, len(candidates), edition_summary
             )
-
-        # Archive
-        if not no_archive and results['sent'] > 1:
-            archive_sent_articles(r2, articles[:results['sent'] - 1])
 
         print(f"\n{'=' * 60}")
         print("[DONE]")
@@ -660,7 +643,6 @@ async def main():
         edition_type=edition_type,
         target_date=target_date,
         dry_run=args.dry_run,
-        no_archive=args.no_archive,
         skip_selection=args.skip_selection,
         skip_extraction=args.skip_extraction,
     )
