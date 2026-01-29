@@ -4,12 +4,14 @@ ADUmedia Telegram Publisher Service
 
 Intelligent publishing service with AI-BASED PROJECT DEDUPLICATION:
 1. Fetches candidates from R2
-2. Extracts project info from summaries using AI
-3. Uses AI to match articles to existing projects (fuzzy matching)
-4. Filters duplicates (same project < 3 months = skip)
-5. Uses AI to select top 7 articles
-6. Records everything in Supabase
-7. Sends digest to Telegram
+2. Extracts project info from summaries using AI (NO DB writes)
+3. Filters duplicates against PUBLISHED projects only
+4. Uses AI to select top 7 articles
+5. Sends digest to Telegram
+6. Records published articles and creates projects in Supabase
+
+IMPORTANT: Projects are ONLY created in the database when articles are
+actually published, not during extraction/filtering.
 
 The AI matching handles:
 - Name variations ("The Spiral" vs "Spiral Tower")
@@ -155,82 +157,54 @@ def fetch_candidates_for_dates(r2: R2Storage, dates: List[date]) -> List[Dict[st
 
 
 # =============================================================================
-# Project Extraction & Matching Pipeline
+# Project Extraction Pipeline (NO DB writes)
 # =============================================================================
 
-async def extract_and_link_projects(
+async def extract_project_info(
     candidates: List[Dict[str, Any]],
-    dedup: DeduplicationChecker,
     skip_extraction: bool = False
 ) -> List[Dict[str, Any]]:
     """
-    Extract project info and link articles to projects using AI.
+    Extract project info from article summaries using AI.
 
-    This is the key step for project-based deduplication:
-    1. Extract project name, architect, location from summary (AI)
-    2. Find existing project using AI fuzzy matching
-    3. Or create new project if no match
-    4. Attach project_id to candidate for dedup checking
+    IMPORTANT: This step ONLY extracts information, it does NOT write to the database.
+    Projects are only created when articles are actually published.
 
     Args:
         candidates: List of candidate articles
-        dedup: DeduplicationChecker instance (with AI matching)
         skip_extraction: Skip AI extraction (for testing)
 
     Returns:
-        Candidates with _project_id and _extracted_info attached
+        Candidates with _extracted_info attached (no _project_id yet)
     """
     if skip_extraction:
         print("[EXTRACT] Skipping project extraction (--skip-extraction)")
+        for candidate in candidates:
+            candidate["_extracted_info"] = {"is_project": False}
         return candidates
 
     print(f"\n[EXTRACT] Extracting project info from {len(candidates)} articles...")
+    print("          (No database writes - just extracting metadata)")
 
     extractor = ProjectExtractor()
 
     # Extract project info in batches
     extractions = await extractor.extract_batch(candidates, batch_size=10)
 
-    # Link to projects using AI matching
-    projects_created = 0
-    projects_matched = 0
+    # Attach extraction results to candidates (NO DB writes)
+    projects_found = 0
     non_projects = 0
 
     for candidate, extraction in zip(candidates, extractions):
         candidate["_extracted_info"] = extraction.model_dump()
+        # NOTE: We do NOT set _project_id here - that happens during filtering/publishing
 
-        if not extraction.is_project or not extraction.project_name:
-            # Not a project article (news, interview, etc.)
-            non_projects += 1
-            candidate["_project_id"] = None
-            continue
-
-        # Format location
-        location_city = None
-        location_country = None
-        if extraction.location:
-            location_city = extraction.location.city
-            location_country = extraction.location.country
-
-        # Find or create project using AI matching
-        project_id, is_new = await dedup.find_or_create_project(
-            project_name=extraction.project_name,
-            architect=extraction.architect,
-            location_city=location_city,
-            location_country=location_country,
-            project_type=extraction.project_type,
-            project_status=extraction.project_status,
-            summary_excerpt=candidate.get("ai_summary", "")[:200],
-        )
-
-        candidate["_project_id"] = project_id
-
-        if is_new:
-            projects_created += 1
+        if extraction.is_project and extraction.project_name:
+            projects_found += 1
         else:
-            projects_matched += 1
+            non_projects += 1
 
-    print(f"   [OK] Projects: {projects_created} new, {projects_matched} matched, {non_projects} non-project articles")
+    print(f"   [OK] Extracted: {projects_found} project articles, {non_projects} non-project articles")
 
     return candidates
 
@@ -250,18 +224,6 @@ async def select_articles(
 
     selector = ArticleSelector()
 
-    # Get previously published project IDs for context
-    published_projects = dedup.get_published_project_ids(
-        since_date=target_date - timedelta(days=90)
-    )
-    print(f"   Recently published projects: {len(published_projects)}")
-
-    # Mark candidates that are about recently-published projects
-    for candidate in candidates:
-        project_id = candidate.get("_project_id")
-        if project_id and project_id in published_projects:
-            candidate["_recently_published"] = True
-
     # Get cross-edition data for Weekly edition
     daily_published_this_week = []
     if edition_type == EditionType.WEEKLY:
@@ -272,7 +234,8 @@ async def select_articles(
         print(f"   Daily published this week: {len(daily_published_this_week)}")
 
     # Run AI selection
-    published_urls = []  # We use project-based dedup now
+    # Note: We pass empty published_urls since we're using project-based dedup now
+    published_urls = []
 
     selection = await selector.select(
         edition_type=edition_type,
@@ -321,7 +284,7 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
             "source_name": article.get("source_name", article.get("source_id", "Unknown")),
             "published": article.get("published"),
             "_fetch_date": article.get("_fetch_date"),
-            "_project_id": article.get("_project_id"),
+            "_extracted_info": article.get("_extracted_info"),  # For recording
             "_selection_reason": article.get("_selection_reason"),
             "_selection_category": article.get("_selection_category"),
         }
@@ -373,10 +336,10 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
 
 
 # =============================================================================
-# Publication Recording
+# Publication Recording (Projects created HERE)
 # =============================================================================
 
-def record_publications(
+async def record_publications(
     dedup: DeduplicationChecker,
     articles: List[Dict[str, Any]],
     edition_type: EditionType,
@@ -384,7 +347,11 @@ def record_publications(
     total_candidates: int,
     edition_summary: Optional[str] = None
 ) -> List[str]:
-    """Record publications in database."""
+    """
+    Record publications in database.
+
+    IMPORTANT: This is where projects are created - only for PUBLISHED articles.
+    """
     print(f"\n[RECORD] Recording {len(articles)} publications...")
 
     article_ids = []
@@ -392,37 +359,56 @@ def record_publications(
     articles_repeated = 0
 
     for article in articles:
-        project_id = article.get("_project_id")
+        extracted_info = article.get("_extracted_info", {})
+
+        # Determine if this is a project article
+        is_project = extracted_info.get("is_project", False)
+        project_name = extracted_info.get("project_name")
+        project_id = None
+
+        if is_project and project_name:
+            # Find or create project - projects are ONLY created here, on publish
+            architect = extracted_info.get("architect")
+            location = extracted_info.get("location", {})
+            location_city = location.get("city") if isinstance(location, dict) else None
+            location_country = location.get("country") if isinstance(location, dict) else None
+
+            project_id, is_new_project = await dedup.find_or_create_project_on_publish(
+                project_name=project_name,
+                architect=architect,
+                location_city=location_city,
+                location_country=location_country,
+                project_type=extracted_info.get("project_type"),
+                project_status=extracted_info.get("project_status"),
+                summary_excerpt=article.get("ai_summary", "")[:200],
+                publish_date=edition_date
+            )
+
+            if is_new_project:
+                articles_new += 1
+            else:
+                articles_repeated += 1
+        else:
+            # Non-project article (news, interview, etc.)
+            articles_new += 1
 
         # Record article in all_articles
-        article_id = dedup.record_article(
+        article_db_id = dedup.record_article(
             article=article,
             project_id=project_id,
-            extracted_info=article.get("_extracted_info"),
+            extracted_info=extracted_info,
             status="published"
         )
 
-        if article_id:
-            article_ids.append(article_id)
+        if article_db_id:
+            article_ids.append(article_db_id)
 
-            # Mark as published
+            # Mark as published with edition info
             dedup.mark_article_published(
-                article_id=article_id,
+                article_id=article_db_id,
                 edition_type=edition_type.value,
                 edition_date=edition_date
             )
-
-            # Update project's last_published_date
-            if project_id:
-                is_dup, last_published = dedup.check_project_duplicate(project_id)
-                if last_published:
-                    articles_repeated += 1
-                else:
-                    articles_new += 1
-
-                dedup.update_project_published(project_id, edition_date)
-            else:
-                articles_new += 1
 
     # Record the edition
     dedup.record_edition(
@@ -435,7 +421,7 @@ def record_publications(
         edition_summary=edition_summary
     )
 
-    print(f"   [OK] Recorded: {articles_new} new projects, {articles_repeated} updates")
+    print(f"   [OK] Recorded: {articles_new} new, {articles_repeated} updates")
     return article_ids
 
 
@@ -506,7 +492,17 @@ async def run_publisher(
     skip_selection: bool = False,
     skip_extraction: bool = False,
 ):
-    """Main publishing pipeline with AI-based project deduplication."""
+    """
+    Main publishing pipeline with AI-based project deduplication.
+
+    Pipeline:
+    1. Fetch candidates from R2
+    2. Extract project info (AI) - NO DB writes
+    3. Filter against PUBLISHED projects only
+    4. AI selection
+    5. Send to Telegram
+    6. Record publications and create projects (DB writes happen HERE)
+    """
     if target_date is None:
         target_date = date.today()
 
@@ -523,7 +519,7 @@ async def run_publisher(
     print(f"{'=' * 60}")
     print(f"Edition: {edition_name}")
     print(f"Date: {target_date.isoformat()} ({target_date.strftime('%A')})")
-    if dry_run: print("[MODE] DRY RUN")
+    if dry_run: print("[MODE] DRY RUN - will not send to Telegram or record")
     if skip_extraction: print("[MODE] SKIP EXTRACTION")
     print(f"{'=' * 60}")
 
@@ -534,7 +530,7 @@ async def run_publisher(
         r2.test_connection()
         dedup = DeduplicationChecker()
 
-        # Fetch candidates
+        # Step 1: Fetch candidates from R2
         dates_to_fetch = get_dates_for_edition(edition_type, target_date)
         print(f"\n[FETCH] {len(dates_to_fetch)} day(s)...")
         candidates = fetch_candidates_for_dates(r2, dates_to_fetch)
@@ -543,25 +539,28 @@ async def run_publisher(
             print("\n[EMPTY] No candidates. Exiting.")
             return
 
-        # Extract and link projects (AI-based)
-        candidates = await extract_and_link_projects(candidates, dedup, skip_extraction)
+        # Step 2: Extract project info (AI) - NO DB WRITES
+        candidates = await extract_project_info(candidates, skip_extraction)
 
-        # Filter duplicates
+        # Step 3: Filter duplicates against PUBLISHED projects
         if not skip_extraction:
-            eligible, duplicates, updates = await dedup.filter_candidates(candidates, PROJECT_COOLDOWN_MONTHS)
+            eligible, duplicates, updates = await dedup.filter_candidates(
+                candidates, PROJECT_COOLDOWN_MONTHS
+            )
 
             if duplicates:
                 print(f"\n[DEDUP] Filtered {len(duplicates)} duplicates:")
-                for dup in duplicates[:3]:
-                    print(f"   - {dup.get('title', '')[:50]}... ({dup.get('_duplicate_reason', '')})")
+                for dup in duplicates[:5]:
+                    print(f"   - {dup.get('title', '')[:50]}...")
+                    print(f"     Reason: {dup.get('_duplicate_reason', 'Unknown')}")
 
             candidates = eligible
 
         if not candidates:
-            print("\n[EMPTY] All filtered. Exiting.")
+            print("\n[EMPTY] All filtered as duplicates. Exiting.")
             return
 
-        # AI selection
+        # Step 4: AI selection
         if skip_selection:
             selected = candidates[:ARTICLES_PER_EDITION]
             edition_summary = "Selection skipped"
@@ -573,7 +572,7 @@ async def run_publisher(
             print("\n[EMPTY] Nothing selected. Exiting.")
             return
 
-        # Prepare for Telegram
+        # Step 5: Prepare for Telegram
         articles = prepare_articles_for_telegram(selected, r2)
 
         print(f"\n[READY] {len(articles)} articles:")
@@ -582,20 +581,22 @@ async def run_publisher(
             print(f"   {i}. {img} [{a.get('source_name', '')[:12]}] {a.get('title', '')[:40]}...")
 
         if dry_run:
-            print("\n[DRY RUN] Complete.")
+            print("\n[DRY RUN] Complete. No Telegram send, no DB records.")
             return
 
-        # Send to Telegram
-        print("\n[SEND] Sending...")
+        # Step 6: Send to Telegram
+        print("\n[SEND] Sending to Telegram...")
         bot = TelegramBot()
         results = await bot.send_digest(articles, include_header=True)
 
         print(f"\n[RESULT] Sent: {results['sent']}, Failed: {results['failed']}")
 
-        # Record publications (no archiving - files stay in place)
+        # Step 7: Record publications (PROJECTS CREATED HERE)
+        # Only record articles that were actually sent (minus the header)
         if results['sent'] > 1:
-            record_publications(
-                dedup, articles[:results['sent'] - 1],
+            sent_articles = articles[:results['sent'] - 1]  # -1 for header
+            await record_publications(
+                dedup, sent_articles,
                 edition_type, target_date, len(candidates), edition_summary
             )
 

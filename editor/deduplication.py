@@ -9,6 +9,9 @@ Key Logic:
 - Same project published < 3 months ago = DUPLICATE (skip)
 - Same project published > 3 months ago = UPDATE (allow with flag)
 - AI determines if two articles are about the same building/project
+
+IMPORTANT: Projects are only created in the database when articles are PUBLISHED,
+not during the extraction/filtering phase.
 """
 
 import os
@@ -57,13 +60,17 @@ class ProjectMatch(BaseModel):
 class DeduplicationChecker:
     """
     Handles project-based deduplication using AI for fuzzy matching.
-    
+
     Key methods:
-    - find_matching_project_ai(): AI-based fuzzy project matching
+    - find_matching_project_ai(): AI-based fuzzy project matching against PUBLISHED projects
     - check_project_duplicate(): Is this project published recently?
     - record_article(): Track article in all_articles table
+    - create_project_on_publish(): Create project record ONLY when publishing
+
+    IMPORTANT: Projects are only added to the database when articles are published,
+    not during candidate processing.
     """
-    
+
     def __init__(
         self,
         supabase_url: Optional[str] = None,
@@ -72,7 +79,7 @@ class DeduplicationChecker:
     ):
         """
         Initialize the deduplication checker.
-        
+
         Args:
             supabase_url: Supabase project URL (or SUPABASE_URL env var)
             supabase_key: Supabase API key (or SUPABASE_KEY env var)
@@ -80,48 +87,50 @@ class DeduplicationChecker:
         """
         url = supabase_url or os.getenv("SUPABASE_URL")
         key = supabase_key or os.getenv("SUPABASE_KEY")
-        
+
         if not url or not key:
             raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
-        
+
         self.client: Client = create_client(url, key)
-        
+
         # Initialize LLM for matching
         self.llm = ChatOpenAI(
             model=model,
             temperature=0.1,  # Low temperature for consistent matching
             model_kwargs={"response_format": {"type": "json_object"}}
         )
-        
+
         # Load prompt template
         self.match_prompt = self._load_match_prompt()
-        
+
         print("[DEDUP] Connected to Supabase with AI matching")
-    
+
     def _load_match_prompt(self) -> str:
         """Load the project matching prompt template."""
         possible_paths = [
             Path(__file__).parent.parent / "prompts" / "match_project.txt",
             Path("prompts/match_project.txt"),
         ]
-        
+
         for path in possible_paths:
             if path.exists():
                 return path.read_text(encoding="utf-8")
-        
+
         # Fallback inline prompt
         return self._get_default_match_prompt()
-    
+
     def _get_default_match_prompt(self) -> str:
         """Return default matching prompt if file not found."""
         return """Determine if the NEW article is about the SAME project as any EXISTING project.
+
+Do NOT use any emoji in your response.
 
 NEW ARTICLE:
 Project: {new_project_name}
 Architect: {new_architect}
 Location: {new_location}
 
-EXISTING PROJECTS:
+EXISTING PROJECTS (these have been published before):
 {existing_projects_json}
 
 Return JSON:
@@ -129,11 +138,11 @@ Return JSON:
 
 Match if: same building (allowing name variations), same architect, same/similar location.
 Don't match if: different buildings by same architect, or same name but different architect/location."""
-    
+
     # =========================================================================
-    # AI-Based Project Matching
+    # AI-Based Project Matching (against PUBLISHED projects only)
     # =========================================================================
-    
+
     async def find_matching_project_ai(
         self,
         project_name: str,
@@ -144,29 +153,31 @@ Don't match if: different buildings by same architect, or same name but differen
     ) -> Tuple[Optional[str], float, str]:
         """
         Use AI to find matching project in database.
-        
+
+        IMPORTANT: Only matches against PUBLISHED projects (those with last_published_date set).
+
         This handles fuzzy matching for:
         - Name variations ("The Spiral" vs "Spiral Tower")
         - Capitalization differences
         - Architect name variations ("BIG" vs "Bjarke Ingels Group")
         - Location variations ("NYC" vs "New York")
-        
+
         Args:
             project_name: Name of the project from new article
             architect: Architect name (if extracted)
             location: Location (city, country)
             summary_excerpt: First 200 chars of summary for context
             run_name: Optional name for LangSmith trace
-            
+
         Returns:
             Tuple of (project_id or None, confidence, reason)
         """
-        # Get recent projects from database
-        existing_projects = self._get_recent_projects(limit=MAX_PROJECTS_TO_CHECK)
-        
+        # Get only PUBLISHED projects from database
+        existing_projects = self._get_published_projects(limit=MAX_PROJECTS_TO_CHECK)
+
         if not existing_projects:
-            return None, 0.0, "No existing projects in database"
-        
+            return None, 0.0, "No published projects in database"
+
         # Format existing projects for prompt
         projects_for_prompt = []
         for p in existing_projects:
@@ -178,7 +189,7 @@ Don't match if: different buildings by same architect, or same name but differen
                 "location_country": p.get("location_country", ""),
                 "last_published_date": p.get("last_published_date", ""),
             })
-        
+
         # Build prompt
         prompt = self.match_prompt.format(
             new_project_name=project_name or "Unknown",
@@ -187,7 +198,7 @@ Don't match if: different buildings by same architect, or same name but differen
             new_summary_excerpt=(summary_excerpt or "")[:200],
             existing_projects_json=json.dumps(projects_for_prompt, indent=2)
         )
-        
+
         # Configure run metadata
         config = RunnableConfig(
             run_name=run_name or f"match-{(project_name or 'unknown')[:20]}",
@@ -198,16 +209,16 @@ Don't match if: different buildings by same architect, or same name but differen
                 "candidates_count": len(existing_projects),
             }
         )
-        
+
         try:
             # Call LLM
             messages = [("human", prompt)]
             response = await self.llm.ainvoke(messages, config=config)
-            
+
             # Parse response
             result = json.loads(response.content)
             match = ProjectMatch(**result)
-            
+
             if match.match_found and match.confidence >= MATCH_CONFIDENCE_THRESHOLD:
                 print(f"[DEDUP] AI Match: {project_name} -> {match.matched_project_id} "
                       f"(confidence: {match.confidence:.2f})")
@@ -215,29 +226,44 @@ Don't match if: different buildings by same architect, or same name but differen
             else:
                 print(f"[DEDUP] No AI match for: {project_name} (confidence: {match.confidence:.2f})")
                 return None, match.confidence, match.match_reason
-                
+
         except Exception as e:
             print(f"[DEDUP] AI matching error: {e}")
             return None, 0.0, f"Error: {e}"
-    
-    def _get_recent_projects(self, limit: int = MAX_PROJECTS_TO_CHECK) -> List[Dict[str, Any]]:
-        """Get recent projects from database for matching."""
+
+    def _get_published_projects(self, limit: int = MAX_PROJECTS_TO_CHECK) -> List[Dict[str, Any]]:
+        """
+        Get projects from database for matching.
+
+        Returns ALL projects - the existence of a project in the database
+        means it was published (or at least processed). We use first_seen_date
+        as fallback for legacy data without last_published_date.
+        """
         try:
             result = self.client.table("projects")\
                 .select("id, project_name, architect, location_city, location_country, last_published_date, first_seen_date")\
                 .order("first_seen_date", desc=True)\
                 .limit(limit)\
                 .execute()
-            
+
             return result.data
         except Exception as e:
-            print(f"[DEDUP] Failed to get recent projects: {e}")
+            print(f"[DEDUP] Failed to get projects: {e}")
             return []
-    
+
+    def _get_recent_projects(self, limit: int = MAX_PROJECTS_TO_CHECK) -> List[Dict[str, Any]]:
+        """
+        Get recent projects from database for matching.
+
+        DEPRECATED: Use _get_published_projects instead.
+        Keeping for backward compatibility.
+        """
+        return self._get_published_projects(limit)
+
     # =========================================================================
     # Project Operations
     # =========================================================================
-    
+
     def create_project(
         self,
         project_name: str,
@@ -246,40 +272,178 @@ Don't match if: different buildings by same architect, or same name but differen
         location_country: Optional[str] = None,
         project_type: Optional[str] = None,
         project_status: Optional[str] = None,
-        first_article_id: Optional[str] = None
+        first_article_id: Optional[str] = None,
+        publish_date: Optional[date] = None
     ) -> Optional[str]:
         """
         Create a new project entry.
-        
+
+        NOTE: This should ONLY be called when actually publishing an article.
+
+        Args:
+            project_name: Name of the project
+            architect: Architect firm name
+            location_city: City
+            location_country: Country
+            project_type: Type of project
+            project_status: Status (completed, announced, etc.)
+            first_article_id: UUID of the first article about this project
+            publish_date: Date of publication (sets last_published_date)
+
         Returns:
             UUID of created project, or None if failed
         """
+        if publish_date is None:
+            publish_date = date.today()
+
         data = {
             "project_name": project_name,
             "architect": architect,
             "location_city": location_city,
             "location_country": location_country,
-            "first_seen_date": date.today().isoformat(),
+            "first_seen_date": publish_date.isoformat(),
             "first_article_id": first_article_id,
             "project_type": project_type,
             "project_status": project_status,
-            "times_published": 0,
+            "times_published": 1,
+            "last_published_date": publish_date.isoformat(),  # Set immediately
         }
-        
+
         try:
             result = self.client.table("projects")\
                 .insert(data)\
                 .execute()
-            
+
             if result.data:
                 project_id = result.data[0]["id"]
                 print(f"[DEDUP] Created project: {project_name} ({project_id[:8]}...)")
                 return project_id
         except Exception as e:
             print(f"[DEDUP] Failed to create project: {e}")
-        
+
         return None
-    
+
+    async def find_existing_project(
+        self,
+        project_name: str,
+        architect: Optional[str] = None,
+        location_city: Optional[str] = None,
+        location_country: Optional[str] = None,
+        summary_excerpt: Optional[str] = None,
+    ) -> Tuple[Optional[str], bool, Optional[date]]:
+        """
+        Check if a matching project already exists (was published before).
+
+        This is used during filtering to detect duplicates WITHOUT creating new projects.
+
+        Args:
+            project_name: Name of the project
+            architect: Architect firm name
+            location_city: City
+            location_country: Country
+            summary_excerpt: Summary for matching context
+
+        Returns:
+            Tuple of (project_id or None, is_duplicate, last_published_date)
+            - project_id: UUID if match found, None otherwise
+            - is_duplicate: True if published within cooldown period
+            - last_published_date: When it was last published
+        """
+        # Format location for matching
+        location = None
+        if location_city or location_country:
+            parts = [p for p in [location_city, location_country] if p]
+            location = ", ".join(parts)
+
+        # Try AI matching against published projects
+        matched_id, confidence, reason = await self.find_matching_project_ai(
+            project_name=project_name,
+            architect=architect,
+            location=location,
+            summary_excerpt=summary_excerpt
+        )
+
+        if not matched_id:
+            # No match - this is a new project (not a duplicate)
+            return None, False, None
+
+        # Check when this project was last published
+        is_duplicate, last_published = self.check_project_duplicate(matched_id)
+
+        return matched_id, is_duplicate, last_published
+
+    async def find_or_create_project_on_publish(
+        self,
+        project_name: str,
+        architect: Optional[str] = None,
+        location_city: Optional[str] = None,
+        location_country: Optional[str] = None,
+        project_type: Optional[str] = None,
+        project_status: Optional[str] = None,
+        summary_excerpt: Optional[str] = None,
+        article_id: Optional[str] = None,
+        publish_date: Optional[date] = None
+    ) -> Tuple[Optional[str], bool]:
+        """
+        Find existing project or create new one - ONLY call when publishing.
+
+        This is the method to use when recording a published article.
+        It will either:
+        - Find existing project and update its last_published_date
+        - Create new project with last_published_date set
+
+        Args:
+            project_name: Name of the project
+            architect: Architect firm name
+            location_city: City
+            location_country: Country
+            project_type: Type of project
+            project_status: Status of project
+            summary_excerpt: Summary for matching context
+            article_id: UUID of the article (for first_article_id)
+            publish_date: Date of publication
+
+        Returns:
+            Tuple of (project_id, is_new)
+        """
+        if publish_date is None:
+            publish_date = date.today()
+
+        # Format location for matching
+        location = None
+        if location_city or location_country:
+            parts = [p for p in [location_city, location_country] if p]
+            location = ", ".join(parts)
+
+        # Try AI matching first
+        matched_id, confidence, reason = await self.find_matching_project_ai(
+            project_name=project_name,
+            architect=architect,
+            location=location,
+            summary_excerpt=summary_excerpt
+        )
+
+        if matched_id:
+            print(f"[DEDUP] Matched to existing project: {reason}")
+            # Update the existing project's publish date
+            self.update_project_published(matched_id, publish_date)
+            return matched_id, False
+
+        # No match found - create new project with publish_date set
+        project_id = self.create_project(
+            project_name=project_name,
+            architect=architect,
+            location_city=location_city,
+            location_country=location_country,
+            project_type=project_type,
+            project_status=project_status,
+            first_article_id=article_id,
+            publish_date=publish_date
+        )
+
+        return project_id, True
+
+    # DEPRECATED: Old method that creates projects too early
     async def find_or_create_project(
         self,
         project_name: str,
@@ -292,56 +456,28 @@ Don't match if: different buildings by same architect, or same name but differen
         article_id: Optional[str] = None
     ) -> Tuple[Optional[str], bool]:
         """
-        Find existing project using AI matching, or create new one.
-        
-        Args:
-            project_name: Name of the project
-            architect: Architect firm name
-            location_city: City
-            location_country: Country
-            project_type: Type of project
-            project_status: Status of project
-            summary_excerpt: Summary for matching context
-            article_id: UUID of the article (for first_article_id)
-            
-        Returns:
-            Tuple of (project_id, is_new)
+        DEPRECATED: Use find_existing_project() for filtering and 
+        find_or_create_project_on_publish() when publishing.
+
+        This method is kept for backward compatibility but should not be used
+        in new code as it creates projects before they're published.
         """
-        # Format location for matching
-        location = None
-        if location_city or location_country:
-            parts = [p for p in [location_city, location_country] if p]
-            location = ", ".join(parts)
-        
-        # Try AI matching first
-        matched_id, confidence, reason = await self.find_matching_project_ai(
-            project_name=project_name,
-            architect=architect,
-            location=location,
-            summary_excerpt=summary_excerpt
-        )
-        
-        if matched_id:
-            print(f"[DEDUP] Matched to existing project: {reason}")
-            return matched_id, False
-        
-        # No match found - create new project
-        project_id = self.create_project(
+        print("[DEDUP] WARNING: Using deprecated find_or_create_project()")
+        return await self.find_or_create_project_on_publish(
             project_name=project_name,
             architect=architect,
             location_city=location_city,
             location_country=location_country,
             project_type=project_type,
             project_status=project_status,
-            first_article_id=article_id
+            summary_excerpt=summary_excerpt,
+            article_id=article_id
         )
-        
-        return project_id, True
-    
+
     # =========================================================================
     # Duplicate Detection
     # =========================================================================
-    
+
     def check_project_duplicate(
         self,
         project_id: str,
@@ -349,46 +485,55 @@ Don't match if: different buildings by same architect, or same name but differen
     ) -> Tuple[bool, Optional[date]]:
         """
         Check if a project was published recently.
-        
+
         Args:
             project_id: UUID of the project
             cooldown_months: Months before project can be republished
-            
+
         Returns:
             Tuple of (is_duplicate, last_published_date)
             - is_duplicate: True if published within cooldown period
-            - last_published_date: When it was last published (or None)
+            - last_published_date: When it was last published (or None if never, but project exists = today)
         """
         try:
             result = self.client.table("projects")\
-                .select("last_published_date, times_published")\
+                .select("last_published_date, times_published, first_seen_date")\
                 .eq("id", project_id)\
                 .limit(1)\
                 .execute()
-            
+
             if not result.data:
                 return False, None
-            
+
             project = result.data[0]
             last_published = project.get("last_published_date")
-            
+
+            # If last_published_date is NULL but project exists, use first_seen_date
+            # This handles legacy data where projects were created without publish dates
             if not last_published:
-                return False, None
-            
+                first_seen = project.get("first_seen_date")
+                if first_seen:
+                    print(f"[DEDUP] Project has no last_published_date, using first_seen_date: {first_seen}")
+                    last_published = first_seen
+                else:
+                    # Project exists but no dates at all - treat as recently published (today)
+                    print(f"[DEDUP] Project has no dates, treating as published today")
+                    last_published = date.today().isoformat()
+
             # Parse date
             if isinstance(last_published, str):
                 last_published = date.fromisoformat(last_published)
-            
+
             # Check cooldown
             cooldown_date = date.today() - timedelta(days=cooldown_months * 30)
             is_duplicate = last_published > cooldown_date
-            
+
             return is_duplicate, last_published
-            
+
         except Exception as e:
             print(f"[DEDUP] Error checking duplicate: {e}")
             return False, None
-    
+
     def update_project_published(
         self,
         project_id: str,
@@ -397,7 +542,7 @@ Don't match if: different buildings by same architect, or same name but differen
         """Update project when an article about it is published."""
         if publish_date is None:
             publish_date = date.today()
-        
+
         try:
             # Get current times_published
             result = self.client.table("projects")\
@@ -405,11 +550,11 @@ Don't match if: different buildings by same architect, or same name but differen
                 .eq("id", project_id)\
                 .limit(1)\
                 .execute()
-            
+
             times_published = 0
             if result.data:
                 times_published = result.data[0].get("times_published", 0) or 0
-            
+
             # Update
             self.client.table("projects")\
                 .update({
@@ -419,62 +564,81 @@ Don't match if: different buildings by same architect, or same name but differen
                 })\
                 .eq("id", project_id)\
                 .execute()
-            
+
             return True
         except Exception as e:
             print(f"[DEDUP] Failed to update project: {e}")
             return False
-    
+
     # =========================================================================
     # Article Operations
     # =========================================================================
-    
+
     def is_url_recorded(self, url: str) -> bool:
-        """Check if URL already exists in all_articles."""
+        """Check if URL already exists in all_articles with status=published."""
         normalized = url.lower().strip().rstrip("/")
-        
+
         try:
             result = self.client.table("all_articles")\
-                .select("id")\
+                .select("id, status")\
                 .eq("article_url", normalized)\
                 .limit(1)\
                 .execute()
-            
-            return len(result.data) > 0
+
+            if not result.data:
+                return False
+
+            # Only consider it "recorded" if it was actually published
+            return result.data[0].get("status") == "published"
         except Exception as e:
             print(f"[DEDUP] Error checking URL: {e}")
             return False
-    
+
+    def is_url_published(self, url: str) -> bool:
+        """Check if URL was actually published (sent to Telegram)."""
+        return self.is_url_recorded(url)
+
     def record_article(
         self,
         article: Dict[str, Any],
         project_id: Optional[str] = None,
         extracted_info: Optional[Dict[str, Any]] = None,
-        status: str = "candidate"
+        status: str = "published"
     ) -> Optional[str]:
         """
         Record an article in all_articles table.
-        
+
+        NOTE: Default status changed to 'published' - only call this when publishing.
+
         Args:
             article: Article dict from R2
             project_id: UUID of linked project (if any)
             extracted_info: AI-extracted project info
-            status: Initial status (default: 'candidate')
-            
+            status: Status (default: 'published')
+
         Returns:
             UUID of created record, or None if failed/duplicate
         """
         url = article.get("link", "").lower().strip().rstrip("/")
-        
+
         if not url:
             print("[DEDUP] Cannot record article without URL")
             return None
-        
+
         # Check if already exists
-        if self.is_url_recorded(url):
-            print(f"[DEDUP] Article already recorded: {url[:50]}...")
-            return None
-        
+        try:
+            existing = self.client.table("all_articles")\
+                .select("id")\
+                .eq("article_url", url)\
+                .limit(1)\
+                .execute()
+
+            if existing.data:
+                print(f"[DEDUP] Article already recorded: {url[:50]}...")
+                return existing.data[0]["id"]
+        except Exception:
+            pass
+
         data = {
             "article_url": url,
             "source_id": article.get("source_id", "unknown"),
@@ -489,7 +653,7 @@ Don't match if: different buildings by same architect, or same name but differen
             "status": status,
             "project_id": project_id,
         }
-        
+
         # Add extracted info if provided
         if extracted_info:
             data["extracted_project_name"] = extracted_info.get("project_name")
@@ -499,19 +663,19 @@ Don't match if: different buildings by same architect, or same name but differen
                 city = location.get("city", "")
                 country = location.get("country", "")
                 data["extracted_location"] = f"{city}, {country}".strip(", ")
-        
+
         try:
             result = self.client.table("all_articles")\
                 .insert(data)\
                 .execute()
-            
+
             if result.data:
                 return result.data[0]["id"]
         except Exception as e:
             print(f"[DEDUP] Failed to record article: {e}")
-        
+
         return None
-    
+
     def update_article_status(
         self,
         article_id: str,
@@ -525,14 +689,14 @@ Don't match if: different buildings by same architect, or same name but differen
             "status": status,
             "updated_at": datetime.utcnow().isoformat(),
         }
-        
+
         if selection_reason:
             data["selection_reason"] = selection_reason
         if selection_category:
             data["selection_category"] = selection_category
         if weekly_candidate is not None:
             data["weekly_candidate"] = weekly_candidate
-        
+
         try:
             self.client.table("all_articles")\
                 .update(data)\
@@ -542,7 +706,7 @@ Don't match if: different buildings by same architect, or same name but differen
         except Exception as e:
             print(f"[DEDUP] Failed to update article status: {e}")
             return False
-    
+
     def mark_article_published(
         self,
         article_id: str,
@@ -557,43 +721,43 @@ Don't match if: different buildings by same architect, or same name but differen
                 .eq("id", article_id)\
                 .limit(1)\
                 .execute()
-            
+
             if not result.data:
                 return False
-            
+
             current = result.data[0]
             editions = current.get("selected_for_editions") or []
             dates = current.get("edition_dates") or []
-            
+
             if edition_type not in editions:
                 editions.append(edition_type)
             dates.append(edition_date.isoformat())
-            
+
             update_data = {
                 "status": "published",
                 "selected_for_editions": editions,
                 "edition_dates": dates,
                 "updated_at": datetime.utcnow().isoformat(),
             }
-            
+
             # Set first_published_at if not set
             if not current.get("first_published_at"):
                 update_data["first_published_at"] = datetime.utcnow().isoformat()
-            
+
             self.client.table("all_articles")\
                 .update(update_data)\
                 .eq("id", article_id)\
                 .execute()
-            
+
             return True
         except Exception as e:
             print(f"[DEDUP] Failed to mark article published: {e}")
             return False
-    
+
     # =========================================================================
     # Candidate Filtering
     # =========================================================================
-    
+
     async def filter_candidates(
         self,
         candidates: List[Dict[str, Any]],
@@ -601,11 +765,17 @@ Don't match if: different buildings by same architect, or same name but differen
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         Filter candidates based on project deduplication.
-        
+
+        This method:
+        1. Checks each candidate against PUBLISHED projects
+        2. Marks duplicates (same project published < 3 months)
+        3. Marks updates (same project published > 3 months)
+        4. Does NOT create any new projects (that happens on publish)
+
         Args:
-            candidates: List of candidate article dicts
+            candidates: List of candidate article dicts with _extracted_info
             cooldown_months: Months before project can be republished
-            
+
         Returns:
             Tuple of (eligible, duplicates, updates)
             - eligible: Articles that can be published
@@ -615,41 +785,65 @@ Don't match if: different buildings by same architect, or same name but differen
         eligible = []
         duplicates = []
         updates = []
-        
+
+        print(f"[DEDUP] Filtering {len(candidates)} candidates against published projects...")
+
         for candidate in candidates:
-            project_id = candidate.get("_project_id")
-            
-            if not project_id:
-                # No project linked = always eligible (news, interviews, etc.)
+            # First check: URL already published?
+            url = candidate.get("link", "")
+            if url and self.is_url_published(url):
+                candidate["_duplicate_reason"] = "URL already published"
+                duplicates.append(candidate)
+                continue
+
+            # Get extracted project info
+            extracted = candidate.get("_extracted_info", {})
+
+            if not extracted.get("is_project") or not extracted.get("project_name"):
+                # Not a project article (news, interview, etc.) = always eligible
+                candidate["_project_id"] = None
                 eligible.append(candidate)
                 continue
-            
-            is_duplicate, last_published = self.check_project_duplicate(
-                project_id, cooldown_months
+
+            # Check if this project was published before
+            project_name = extracted.get("project_name")
+            architect = extracted.get("architect")
+            location = extracted.get("location", {})
+            location_city = location.get("city") if isinstance(location, dict) else None
+            location_country = location.get("country") if isinstance(location, dict) else None
+
+            project_id, is_duplicate, last_published = await self.find_existing_project(
+                project_name=project_name,
+                architect=architect,
+                location_city=location_city,
+                location_country=location_country,
+                summary_excerpt=candidate.get("ai_summary", "")[:200]
             )
-            
+
+            candidate["_project_id"] = project_id  # Will be None for new projects
+
             if is_duplicate:
                 days_ago = (date.today() - last_published).days if last_published else 0
-                candidate["_duplicate_reason"] = f"Published {days_ago} days ago on {last_published}"
+                candidate["_duplicate_reason"] = f"Project published {days_ago} days ago on {last_published}"
                 duplicates.append(candidate)
-            elif last_published:
+            elif project_id and last_published:
                 # Published before, but outside cooldown = update
                 candidate["_is_update"] = True
                 candidate["_last_published"] = last_published
                 updates.append(candidate)
                 eligible.append(candidate)  # Updates are eligible
             else:
-                # Never published
+                # Never published = new project = eligible
                 eligible.append(candidate)
-        
-        print(f"[DEDUP] Filtered: {len(eligible)} eligible, {len(duplicates)} duplicates, {len(updates)} updates")
-        
+
+        print(f"[DEDUP] Result: {len(eligible)} eligible, {len(duplicates)} duplicates, {len(updates)} updates")
+
         return eligible, duplicates, updates
-    
+
     # =========================================================================
     # Edition Tracking
     # =========================================================================
-    
+
     def get_published_project_ids(
         self,
         since_date: Optional[date] = None,
@@ -657,13 +851,13 @@ Don't match if: different buildings by same architect, or same name but differen
         """Get IDs of projects published since a date."""
         if since_date is None:
             since_date = date.today() - timedelta(days=90)
-        
+
         try:
             result = self.client.table("projects")\
                 .select("id")\
                 .gte("last_published_date", since_date.isoformat())\
                 .execute()
-            
+
             return {row["id"] for row in result.data}
         except Exception as e:
             print(f"[DEDUP] Error getting published project IDs: {e}")
@@ -782,7 +976,7 @@ Don't match if: different buildings by same architect, or same name but differen
         except Exception as e:
             print(f"[DEDUP] Error getting weekly candidates: {e}")
             return []
-    
+
     def record_edition(
         self,
         edition_type: str,
@@ -808,69 +1002,70 @@ Don't match if: different buildings by same architect, or same name but differen
             "header_message_id": header_message_id,
             "telegram_status": "sent",
         }
-        
+
         try:
             result = self.client.table("editions")\
                 .insert(data)\
                 .execute()
-            
+
             if result.data:
                 edition_id = result.data[0]["id"]
                 print(f"[DEDUP] Recorded edition: {edition_type} - {edition_id[:8]}...")
                 return edition_id
         except Exception as e:
             print(f"[DEDUP] Failed to record edition: {e}")
-        
+
         return None
-    
+
     # =========================================================================
     # Statistics
     # =========================================================================
-    
+
     def get_stats(self, since_date: Optional[date] = None) -> Dict[str, Any]:
         """Get publication statistics."""
         if since_date is None:
             since_date = date.today() - timedelta(days=30)
-        
+
         try:
             # Count articles by status
             articles = self.client.table("all_articles")\
                 .select("status, source_id")\
                 .gte("fetch_date", since_date.isoformat())\
                 .execute()
-            
+
             status_counts: Dict[str, int] = {}
             source_counts: Dict[str, int] = {}
-            
+
             for article in articles.data:
                 status = article.get("status", "unknown")
                 source = article.get("source_id", "unknown")
-                
+
                 status_counts[status] = status_counts.get(status, 0) + 1
                 source_counts[source] = source_counts.get(source, 0) + 1
-            
+
             # Count editions
             editions = self.client.table("editions")\
                 .select("edition_type, articles_new, articles_repeated")\
                 .gte("edition_date", since_date.isoformat())\
                 .execute()
-            
+
             edition_counts: Dict[str, int] = {}
             total_new = 0
             total_repeated = 0
-            
+
             for edition in editions.data:
                 etype = edition.get("edition_type", "unknown")
                 edition_counts[etype] = edition_counts.get(etype, 0) + 1
                 total_new += edition.get("articles_new", 0) or 0
                 total_repeated += edition.get("articles_repeated", 0) or 0
-            
-            # Count unique projects
+
+            # Count unique PUBLISHED projects
             projects = self.client.table("projects")\
                 .select("id")\
+                .not_.is_("last_published_date", "null")\
                 .gte("first_seen_date", since_date.isoformat())\
                 .execute()
-            
+
             return {
                 "period_start": since_date.isoformat(),
                 "total_articles": len(articles.data),
