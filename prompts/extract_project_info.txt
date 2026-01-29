@@ -1,0 +1,69 @@
+You are an architecture news analyst. Extract project information from the article summary below.
+
+IMPORTANT: Do NOT use any emoji in your response.
+
+=== ARTICLE ===
+Summary: {summary}
+Title: {title}
+Source: {source_name}
+URL: {url}
+
+=== EXTRACTION RULES ===
+
+1. Only extract information that is EXPLICITLY mentioned in the summary
+2. Use null for any field that is not clearly stated
+3. For news articles, interviews, or opinion pieces NOT about a specific building, return is_project: false
+
+=== PROJECT TYPES ===
+- residential: Houses, apartments, residential towers
+- commercial: Offices, retail, corporate headquarters
+- cultural: Museums, galleries, theaters, concert halls
+- educational: Schools, universities, libraries
+- healthcare: Hospitals, clinics, medical centers
+- hospitality: Hotels, resorts, restaurants
+- mixed_use: Combined residential/commercial/other
+- infrastructure: Bridges, stations, airports, utilities
+- landscape: Parks, plazas, urban design, public spaces
+- interior: Interior design projects only
+- masterplan: Urban masterplans, campus plans
+- installation: Pavilions, temporary structures, art installations
+- other: Anything that doesn't fit above categories
+
+=== PROJECT STATUS ===
+- completed: Built and finished
+- under_construction: Currently being built
+- announced: Plans revealed, not yet started
+- competition: Design competition entry or winner
+- renovation: Restoration or adaptive reuse
+- demolished: Article about demolished building
+
+=== OUTPUT FORMAT ===
+
+Return ONLY valid JSON:
+
+{{
+    "is_project": true/false,
+    "project_name": "Name of the building/project or null",
+    "architect": "Architect/firm name or null",
+    "location": {{
+        "city": "City name or null",
+        "country": "Country name or null"
+    }},
+    "project_type": "type from list above or null",
+    "project_status": "status from list above or null",
+    "confidence": 0.0-1.0
+}}
+
+=== EXAMPLES ===
+
+EXAMPLE 1 - Clear project:
+Summary: "BIG has completed the Spiral, a 66-story office tower in Hudson Yards, New York."
+Output: {{"is_project": true, "project_name": "The Spiral", "architect": "BIG", "location": {{"city": "New York", "country": "USA"}}, "project_type": "commercial", "project_status": "completed", "confidence": 0.95}}
+
+EXAMPLE 2 - News article (not a project):
+Summary: "RIBA has announced changes to its membership structure for 2026."
+Output: {{"is_project": false, "project_name": null, "architect": null, "location": {{"city": null, "country": null}}, "project_type": null, "project_status": null, "confidence": 0.9}}
+
+EXAMPLE 3 - Competition:
+Summary: "Snohetta wins competition to design new opera house in Oslo."
+Output: {{"is_project": true, "project_name": "Oslo Opera House", "architect": "Snohetta", "location": {{"city": "Oslo", "country": "Norway"}}, "project_type": "cultural", "project_status": "competition", "confidence": 0.85}}
