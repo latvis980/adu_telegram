@@ -279,7 +279,7 @@ class TelegramBot:
         self,
         photo_url: str,
         caption: str | None = None,
-        parse_mode: str = ParseMode.MARKDOWN
+        parse_mode: str = ParseMode.HTML  # Changed from MARKDOWN to HTML
     ) -> bool:
         """
         Send a photo with optional caption to the channel with flood control.
@@ -287,7 +287,7 @@ class TelegramBot:
         Args:
             photo_url: URL of the image to send
             caption: Optional caption text
-            parse_mode: Telegram parse mode
+            parse_mode: Telegram parse mode (HTML)
 
         Returns:
             True if sent successfully
@@ -305,7 +305,7 @@ class TelegramBot:
             return True
 
         # Fallback: try without formatting
-        print("   [INFO] Retrying photo without Markdown formatting...")
+        print("   [INFO] Retrying photo without HTML formatting...")
         return await self._send_with_retry(
             self.bot.send_photo,
             chat_id=self.channel_id,
@@ -439,16 +439,15 @@ class TelegramBot:
         Returns:
             True if sent successfully
         """
-        # Escape status message
-        escaped_status = self._escape_markdown(status)
-        return await self.send_message(escaped_status, disable_preview=True)
+        # No escaping needed for HTML
+        return await self.send_message(status, disable_preview=True)
 
     # =========================================================================
     # Message Formatting
     # =========================================================================
 
     def _format_header(self, article_count: int) -> str:
-        """Format digest header message."""
+        """Format digest header message in plain text."""
         today = datetime.now().strftime("%d %B %Y")
         return (
             f"{today}\n"
@@ -456,7 +455,18 @@ class TelegramBot:
         )
 
     def _format_article(self, article: dict) -> str:
-        """Format single article message in HTML."""
+        """
+        Format single article message in HTML.
+
+        Format:
+        <b>PROJECT NAME / ARCHITECT</b>
+
+        Two-sentence summary
+
+        #tag
+
+        Source Name (as link)
+        """
         url = article.get("link", "")
         headline = article.get("headline", "")
         summary = article.get("ai_summary", "No summary available.")
@@ -466,24 +476,35 @@ class TelegramBot:
 
         message_parts = []
 
+        # 1. Bold headline (PROJECT NAME / ARCHITECT)
         if headline:
-            # Bold headline in HTML
             message_parts.append(f"<b>{headline}</b>")
+            message_parts.append("")  # Empty line after headline
 
-        # Plain text summary
+        # 2. Summary (plain text)
         message_parts.append(summary)
+        message_parts.append("")  # Empty line after summary
 
+        # 3. Tag (exactly one)
         if tag:
+            # Clean tag: lowercase, replace spaces with underscores, remove special chars
             clean_tag = tag.strip().lower().replace(" ", "_")
             clean_tag = re.sub(r'[^a-z0-9_]', '', clean_tag)
             if clean_tag:
                 message_parts.append(f"#{clean_tag}")
+                message_parts.append("")  # Empty line after tag
 
+        # 4. Source link
         if url:
-            # HTML link format
+            # HTML link format: <a href="URL">Source Name</a>
             message_parts.append(f'<a href="{url}">{source_name}</a>')
 
-        return "\n\n".join(message_parts)
+        # Join with single newlines (empty strings create the blank lines)
+        return "\n".join(message_parts)
+
+    # =========================================================================
+    # Connection Testing
+    # =========================================================================
 
     # =========================================================================
     # Connection Testing
