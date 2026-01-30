@@ -161,7 +161,7 @@ Match if: confidence >= 0.75"""
         architect: Optional[str] = None,
         location: Optional[str] = None,
         summary_excerpt: Optional[str] = None,
-        topic_type: str = "building",  # NEW: topic type for better matching
+        topic_type: str = "building",
         run_name: Optional[str] = None
     ) -> Tuple[Optional[str], float, str]:
         """
@@ -203,7 +203,7 @@ Match if: confidence >= 0.75"""
                 "location_city": p.get("location_city", ""),
                 "location_country": p.get("location_country", ""),
                 "last_published_date": p.get("last_published_date", ""),
-                "topic_type": p.get("topic_type", "building"),  # Include topic type
+                "topic_type": p.get("topic_type", "building"),
             })
 
         # Build prompt
@@ -269,6 +269,15 @@ Match if: confidence >= 0.75"""
             print(f"[DEDUP] Failed to get topics: {e}")
             return []
 
+    def _get_recent_projects(self, limit: int = MAX_PROJECTS_TO_CHECK) -> List[Dict[str, Any]]:
+        """
+        Get recent projects from database for matching.
+
+        DEPRECATED: Use _get_published_projects instead.
+        Keeping for backward compatibility.
+        """
+        return self._get_published_projects(limit)
+
     # =========================================================================
     # Topic/Project Operations
     # =========================================================================
@@ -281,7 +290,7 @@ Match if: confidence >= 0.75"""
         location_country: Optional[str] = None,
         project_type: Optional[str] = None,
         project_status: Optional[str] = None,
-        topic_type: str = "building",  # NEW: topic type
+        topic_type: str = "building",
         first_article_id: Optional[str] = None,
         publish_date: Optional[date] = None
     ) -> Optional[str]:
@@ -316,7 +325,7 @@ Match if: confidence >= 0.75"""
             "first_article_id": first_article_id,
             "project_type": project_type,
             "project_status": project_status,
-            "topic_type": topic_type,  # Store topic type
+            "topic_type": topic_type,
             "times_published": 1,
             "last_published_date": publish_date.isoformat(),
         }
@@ -342,7 +351,7 @@ Match if: confidence >= 0.75"""
         location_city: Optional[str] = None,
         location_country: Optional[str] = None,
         summary_excerpt: Optional[str] = None,
-        topic_type: str = "building",  # NEW: topic type
+        topic_type: str = "building",
     ) -> Tuple[Optional[str], bool, Optional[date]]:
         """
         Check if a matching topic already exists (was published before).
@@ -395,7 +404,7 @@ Match if: confidence >= 0.75"""
         location_country: Optional[str] = None,
         project_type: Optional[str] = None,
         project_status: Optional[str] = None,
-        topic_type: str = "building",  # NEW: topic type
+        topic_type: str = "building",
         summary_excerpt: Optional[str] = None,
         article_id: Optional[str] = None,
         publish_date: Optional[date] = None
@@ -461,6 +470,37 @@ Match if: confidence >= 0.75"""
         )
 
         return project_id, True
+
+    # DEPRECATED: Old method that creates projects too early
+    async def find_or_create_project(
+        self,
+        project_name: str,
+        architect: Optional[str] = None,
+        location_city: Optional[str] = None,
+        location_country: Optional[str] = None,
+        project_type: Optional[str] = None,
+        project_status: Optional[str] = None,
+        summary_excerpt: Optional[str] = None,
+        article_id: Optional[str] = None
+    ) -> Tuple[Optional[str], bool]:
+        """
+        DEPRECATED: Use find_existing_project() for filtering and 
+        find_or_create_project_on_publish() when publishing.
+
+        This method is kept for backward compatibility but should not be used
+        in new code as it creates projects before they're published.
+        """
+        print("[DEDUP] WARNING: Using deprecated find_or_create_project()")
+        return await self.find_or_create_project_on_publish(
+            project_name=project_name,
+            architect=architect,
+            location_city=location_city,
+            location_country=location_country,
+            project_type=project_type,
+            project_status=project_status,
+            summary_excerpt=summary_excerpt,
+            article_id=article_id
+        )
 
     # =========================================================================
     # Duplicate Detection
@@ -554,6 +594,191 @@ Match if: confidence >= 0.75"""
             return True
         except Exception as e:
             print(f"[DEDUP] Failed to update topic: {e}")
+            return False
+
+    # =========================================================================
+    # Article Operations
+    # =========================================================================
+
+    def is_url_recorded(self, url: str) -> bool:
+        """Check if URL already exists in all_articles with status=published."""
+        normalized = url.lower().strip().rstrip("/")
+
+        try:
+            result = self.client.table("all_articles")\
+                .select("id, status")\
+                .eq("article_url", normalized)\
+                .limit(1)\
+                .execute()
+
+            if not result.data:
+                return False
+
+            # Only consider it "recorded" if it was actually published
+            return result.data[0].get("status") == "published"
+        except Exception as e:
+            print(f"[DEDUP] Error checking URL: {e}")
+            return False
+
+    def is_url_published(self, url: str) -> bool:
+        """Check if URL was actually published (sent to Telegram)."""
+        return self.is_url_recorded(url)
+
+    def record_article(
+        self,
+        article: Dict[str, Any],
+        project_id: Optional[str] = None,
+        extracted_info: Optional[Dict[str, Any]] = None,
+        status: str = "published"
+    ) -> Optional[str]:
+        """
+        Record an article in all_articles table.
+
+        NOTE: Default status changed to 'published' - only call this when publishing.
+
+        Args:
+            article: Article dict from R2
+            project_id: UUID of linked topic (if any)
+            extracted_info: AI-extracted topic info
+            status: Status (default: 'published')
+
+        Returns:
+            UUID of created record, or None if failed/duplicate
+        """
+        url = article.get("link", "").lower().strip().rstrip("/")
+
+        if not url:
+            print("[DEDUP] Cannot record article without URL")
+            return None
+
+        # Check if already exists
+        try:
+            existing = self.client.table("all_articles")\
+                .select("id")\
+                .eq("article_url", url)\
+                .limit(1)\
+                .execute()
+
+            if existing.data:
+                print(f"[DEDUP] Article already recorded: {url[:50]}...")
+                return existing.data[0]["id"]
+        except Exception:
+            pass
+
+        data = {
+            "article_url": url,
+            "source_id": article.get("source_id", "unknown"),
+            "source_name": article.get("source_name", ""),
+            "original_title": article.get("title", ""),
+            "original_publish_date": article.get("published"),
+            "ai_summary": article.get("ai_summary", ""),
+            "tags": article.get("tags", []),
+            "r2_path": article.get("_r2_path"),
+            "r2_image_path": article.get("image", {}).get("r2_path") if article.get("image") else None,
+            "fetch_date": article.get("_fetch_date", date.today().isoformat()),
+            "status": status,
+            "project_id": project_id,
+        }
+
+        # Add extracted info if provided
+        if extracted_info:
+            data["extracted_project_name"] = extracted_info.get("project_name")
+            data["extracted_architect"] = extracted_info.get("architect")
+            data["extracted_topic_type"] = extracted_info.get("topic_type", "building")
+            location = extracted_info.get("location", {})
+            if location and isinstance(location, dict):
+                city = location.get("city", "")
+                country = location.get("country", "")
+                data["extracted_location"] = f"{city}, {country}".strip(", ")
+
+        try:
+            result = self.client.table("all_articles")\
+                .insert(data)\
+                .execute()
+
+            if result.data:
+                return result.data[0]["id"]
+        except Exception as e:
+            print(f"[DEDUP] Failed to record article: {e}")
+
+        return None
+
+    def update_article_status(
+        self,
+        article_id: str,
+        status: str,
+        selection_reason: Optional[str] = None,
+        selection_category: Optional[str] = None,
+        weekly_candidate: Optional[bool] = None
+    ) -> bool:
+        """Update article status and selection metadata."""
+        data = {
+            "status": status,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        if selection_reason:
+            data["selection_reason"] = selection_reason
+        if selection_category:
+            data["selection_category"] = selection_category
+        if weekly_candidate is not None:
+            data["weekly_candidate"] = weekly_candidate
+
+        try:
+            self.client.table("all_articles")\
+                .update(data)\
+                .eq("id", article_id)\
+                .execute()
+            return True
+        except Exception as e:
+            print(f"[DEDUP] Failed to update article status: {e}")
+            return False
+
+    def mark_article_published(
+        self,
+        article_id: str,
+        edition_type: str,
+        edition_date: date
+    ) -> bool:
+        """Mark article as published and update tracking."""
+        try:
+            # Get current data
+            result = self.client.table("all_articles")\
+                .select("selected_for_editions, edition_dates, first_published_at")\
+                .eq("id", article_id)\
+                .limit(1)\
+                .execute()
+
+            if not result.data:
+                return False
+
+            current = result.data[0]
+            editions = current.get("selected_for_editions") or []
+            dates = current.get("edition_dates") or []
+
+            if edition_type not in editions:
+                editions.append(edition_type)
+            dates.append(edition_date.isoformat())
+
+            update_data = {
+                "status": "published",
+                "selected_for_editions": editions,
+                "edition_dates": dates,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+
+            # Set first_published_at if not set
+            if not current.get("first_published_at"):
+                update_data["first_published_at"] = datetime.utcnow().isoformat()
+
+            self.client.table("all_articles")\
+                .update(update_data)\
+                .eq("id", article_id)\
+                .execute()
+
+            return True
+        except Exception as e:
+            print(f"[DEDUP] Failed to mark article published: {e}")
             return False
 
     # =========================================================================
@@ -655,186 +880,241 @@ Match if: confidence >= 0.75"""
         return eligible, duplicates, updates
 
     # =========================================================================
-    # Article Operations (unchanged, but added topic_type support)
+    # Edition Tracking
     # =========================================================================
 
-    def is_url_recorded(self, url: str) -> bool:
-        """Check if URL already exists in all_articles with status=published."""
-        normalized = url.lower().strip().rstrip("/")
+    def get_published_project_ids(
+        self,
+        since_date: Optional[date] = None,
+    ) -> set:
+        """Get IDs of projects published since a date."""
+        if since_date is None:
+            since_date = date.today() - timedelta(days=90)
 
         try:
-            result = self.client.table("all_articles")\
-                .select("id, status")\
-                .eq("article_url", normalized)\
-                .limit(1)\
+            result = self.client.table("projects")\
+                .select("id")\
+                .gte("last_published_date", since_date.isoformat())\
                 .execute()
 
-            if not result.data:
-                return False
-
-            # Only consider it "recorded" if it was actually published
-            return result.data[0].get("status") == "published"
+            return {row["id"] for row in result.data}
         except Exception as e:
-            print(f"[DEDUP] Error checking URL: {e}")
-            return False
+            print(f"[DEDUP] Error getting published project IDs: {e}")
+            return set()
 
-    def is_url_published(self, url: str) -> bool:
-        """Check if URL was actually published (sent to Telegram)."""
-        return self.is_url_recorded(url)
-
-    def record_article(
+    def get_daily_published_for_weekly(
         self,
-        article: Dict[str, Any],
-        project_id: Optional[str] = None,
-        extracted_info: Optional[Dict[str, Any]] = None,
-        status: str = "published"
-    ) -> Optional[str]:
+        week_start: date,
+        week_end: date
+    ) -> List[Dict[str, str]]:
         """
-        Record an article in all_articles table.
+        Get articles published in daily editions for the weekly edition.
 
-        NOTE: Default status changed to 'published' - only call this when publishing.
+        This helps the Weekly AI know which articles were already shown
+        in Wed/Thu/Fri daily editions, so it can mark them as "repeats"
+        vs "new" discoveries.
 
         Args:
-            article: Article dict from R2
-            project_id: UUID of linked topic (if any)
-            extracted_info: AI-extracted topic info
-            status: Status (default: 'published')
+            week_start: Start of the week (Monday)
+            week_end: End of the week (Sunday)
 
         Returns:
-            UUID of created record, or None if failed/duplicate
+            List of dicts with: url, title, date, edition_type
         """
-        url = article.get("link", "").lower().strip().rstrip("/")
-
-        if not url:
-            print("[DEDUP] Cannot record article without URL")
-            return None
-
-        # Check if already exists
         try:
-            existing = self.client.table("all_articles")\
-                .select("id")\
-                .eq("article_url", url)\
-                .limit(1)\
+            # Query all_articles that were published in daily editions during this week
+            result = self.client.table("all_articles")\
+                .select("article_url, original_title, fetch_date, selected_for_editions")\
+                .gte("fetch_date", week_start.isoformat())\
+                .lte("fetch_date", week_end.isoformat())\
+                .eq("status", "published")\
                 .execute()
 
-            if existing.data:
-                print(f"[DEDUP] Article already recorded: {url[:50]}...")
-                return existing.data[0]["id"]
-        except Exception:
-            pass
+            daily_articles = []
+            for row in result.data:
+                editions = row.get("selected_for_editions") or []
+                # Only include if it was in a daily edition
+                if "daily" in editions:
+                    daily_articles.append({
+                        "url": row.get("article_url", ""),
+                        "title": row.get("original_title", ""),
+                        "date": row.get("fetch_date", ""),
+                    })
 
+            print(f"[DEDUP] Found {len(daily_articles)} daily-published articles for weekly")
+            return daily_articles
+
+        except Exception as e:
+            print(f"[DEDUP] Error getting daily published for weekly: {e}")
+            return []
+
+    def save_weekly_candidates(
+        self,
+        article_ids: List[str],
+        week_start_date: date,
+        categories: Optional[Dict[str, str]] = None
+    ) -> int:
+        """
+        Save articles flagged as weekly candidates.
+
+        Called after daily selection when AI marks articles with weekly_candidate=true.
+
+        Args:
+            article_ids: List of article UUIDs to flag
+            week_start_date: Monday of the week
+            categories: Optional dict mapping article_id to category
+
+        Returns:
+            Number of candidates saved
+        """
+        saved = 0
+        categories = categories or {}
+
+        for article_id in article_ids:
+            try:
+                data = {
+                    "article_id": article_id,
+                    "week_start_date": week_start_date.isoformat(),
+                    "category": categories.get(article_id),
+                    "is_selected": False,
+                }
+
+                self.client.table("weekly_candidates")\
+                    .insert(data)\
+                    .execute()
+
+                saved += 1
+            except Exception as e:
+                # Might be duplicate, ignore
+                print(f"[DEDUP] Failed to save weekly candidate {article_id}: {e}")
+
+        print(f"[DEDUP] Saved {saved} weekly candidates for week of {week_start_date}")
+        return saved
+
+    def get_weekly_candidates(
+        self,
+        week_start_date: date
+    ) -> List[str]:
+        """
+        Get article IDs flagged as weekly candidates for a given week.
+
+        Args:
+            week_start_date: Monday of the week
+
+        Returns:
+            List of article UUIDs
+        """
+        try:
+            result = self.client.table("weekly_candidates")\
+                .select("article_id")\
+                .eq("week_start_date", week_start_date.isoformat())\
+                .eq("is_selected", False)\
+                .execute()
+
+            return [row["article_id"] for row in result.data]
+        except Exception as e:
+            print(f"[DEDUP] Error getting weekly candidates: {e}")
+            return []
+
+    def record_edition(
+        self,
+        edition_type: str,
+        edition_date: date,
+        article_ids: List[str],
+        total_candidates: int,
+        articles_new: int,
+        articles_repeated: int = 0,
+        edition_summary: Optional[str] = None,
+        header_message_id: Optional[int] = None
+    ) -> Optional[str]:
+        """Record an edition in the database."""
         data = {
-            "article_url": url,
-            "source_id": article.get("source_id", "unknown"),
-            "source_name": article.get("source_name", ""),
-            "original_title": article.get("title", ""),
-            "original_publish_date": article.get("published"),
-            "ai_summary": article.get("ai_summary", ""),
-            "tags": article.get("tags", []),
-            "r2_path": article.get("_r2_path"),
-            "r2_image_path": article.get("image", {}).get("r2_path") if article.get("image") else None,
-            "fetch_date": article.get("_fetch_date", date.today().isoformat()),
-            "status": status,
-            "project_id": project_id,
+            "edition_type": edition_type,
+            "edition_date": edition_date.isoformat(),
+            "published_at": datetime.utcnow().isoformat(),
+            "total_candidates": total_candidates,
+            "articles_selected": len(article_ids),
+            "articles_new": articles_new,
+            "articles_repeated": articles_repeated,
+            "article_ids": article_ids,
+            "edition_summary": edition_summary,
+            "header_message_id": header_message_id,
+            "telegram_status": "sent",
         }
 
-        # Add extracted info if provided
-        if extracted_info:
-            data["extracted_project_name"] = extracted_info.get("project_name")
-            data["extracted_architect"] = extracted_info.get("architect")
-            data["extracted_topic_type"] = extracted_info.get("topic_type", "building")  # NEW
-            location = extracted_info.get("location", {})
-            if location and isinstance(location, dict):
-                city = location.get("city", "")
-                country = location.get("country", "")
-                data["extracted_location"] = f"{city}, {country}".strip(", ")
-
         try:
-            result = self.client.table("all_articles")\
+            result = self.client.table("editions")\
                 .insert(data)\
                 .execute()
 
             if result.data:
-                return result.data[0]["id"]
+                edition_id = result.data[0]["id"]
+                print(f"[DEDUP] Recorded edition: {edition_type} - {edition_id[:8]}...")
+                return edition_id
         except Exception as e:
-            print(f"[DEDUP] Failed to record article: {e}")
+            print(f"[DEDUP] Failed to record edition: {e}")
 
         return None
 
-    def update_article_status(
-        self,
-        article_id: str,
-        status: str,
-        selection_reason: Optional[str] = None,
-        selection_category: Optional[str] = None,
-        weekly_candidate: Optional[bool] = None
-    ) -> bool:
-        """Update article status and selection metadata."""
-        data = {
-            "status": status,
-            "updated_at": datetime.utcnow().isoformat(),
-        }
+    # =========================================================================
+    # Statistics
+    # =========================================================================
 
-        if selection_reason:
-            data["selection_reason"] = selection_reason
-        if selection_category:
-            data["selection_category"] = selection_category
-        if weekly_candidate is not None:
-            data["weekly_candidate"] = weekly_candidate
+    def get_stats(self, since_date: Optional[date] = None) -> Dict[str, Any]:
+        """Get publication statistics."""
+        if since_date is None:
+            since_date = date.today() - timedelta(days=30)
 
         try:
-            self.client.table("all_articles")\
-                .update(data)\
-                .eq("id", article_id)\
-                .execute()
-            return True
-        except Exception as e:
-            print(f"[DEDUP] Failed to update article status: {e}")
-            return False
-
-    def mark_article_published(
-        self,
-        article_id: str,
-        edition_type: str,
-        edition_date: date
-    ) -> bool:
-        """Mark article as published and update tracking."""
-        try:
-            # Get current data
-            result = self.client.table("all_articles")\
-                .select("selected_for_editions, edition_dates, first_published_at")\
-                .eq("id", article_id)\
-                .limit(1)\
+            # Count articles by status
+            articles = self.client.table("all_articles")\
+                .select("status, source_id")\
+                .gte("fetch_date", since_date.isoformat())\
                 .execute()
 
-            if not result.data:
-                return False
+            status_counts: Dict[str, int] = {}
+            source_counts: Dict[str, int] = {}
 
-            current = result.data[0]
-            editions = current.get("selected_for_editions") or []
-            dates = current.get("edition_dates") or []
+            for article in articles.data:
+                status = article.get("status", "unknown")
+                source = article.get("source_id", "unknown")
 
-            if edition_type not in editions:
-                editions.append(edition_type)
-            dates.append(edition_date.isoformat())
+                status_counts[status] = status_counts.get(status, 0) + 1
+                source_counts[source] = source_counts.get(source, 0) + 1
 
-            update_data = {
-                "status": "published",
-                "selected_for_editions": editions,
-                "edition_dates": dates,
-                "updated_at": datetime.utcnow().isoformat(),
+            # Count editions
+            editions = self.client.table("editions")\
+                .select("edition_type, articles_new, articles_repeated")\
+                .gte("edition_date", since_date.isoformat())\
+                .execute()
+
+            edition_counts: Dict[str, int] = {}
+            total_new = 0
+            total_repeated = 0
+
+            for edition in editions.data:
+                etype = edition.get("edition_type", "unknown")
+                edition_counts[etype] = edition_counts.get(etype, 0) + 1
+                total_new += edition.get("articles_new", 0) or 0
+                total_repeated += edition.get("articles_repeated", 0) or 0
+
+            # Count unique PUBLISHED projects
+            projects = self.client.table("projects")\
+                .select("id")\
+                .not_.is_("last_published_date", "null")\
+                .gte("first_seen_date", since_date.isoformat())\
+                .execute()
+
+            return {
+                "period_start": since_date.isoformat(),
+                "total_articles": len(articles.data),
+                "status_distribution": status_counts,
+                "source_distribution": source_counts,
+                "editions": edition_counts,
+                "unique_projects": len(projects.data),
+                "total_new_publications": total_new,
+                "total_repeated_publications": total_repeated,
             }
-
-            # Set first_published_at if not set
-            if not current.get("first_published_at"):
-                update_data["first_published_at"] = datetime.utcnow().isoformat()
-
-            self.client.table("all_articles")\
-                .update(update_data)\
-                .eq("id", article_id)\
-                .execute()
-
-            return True
         except Exception as e:
-            print(f"[DEDUP] Failed to mark article published: {e}")
-            return False
+            print(f"[DEDUP] Error getting stats: {e}")
+            return {}
