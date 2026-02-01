@@ -511,25 +511,26 @@ class ArticleSelector:
 def determine_edition_type(target_date: Optional[date] = None) -> Optional[EditionType]:
     """
     Determine what edition type to publish based on day of week.
-    
+
     Args:
         target_date: Date to check (defaults to today)
-        
+
     Returns:
         EditionType or None if no publication today
     """
     if target_date is None:
         target_date = date.today()
-    
+
     weekday = target_date.weekday()  # Monday = 0, Sunday = 6
-    
-    if weekday == 0:      # Monday
+
+    # TEMPORARY: Changed from Monday (0) to Sunday (6) for weekly
+    if weekday == 6:      # Sunday (TEMPORARY - normally Monday/0)
         return EditionType.WEEKLY
     elif weekday == 1:    # Tuesday
         return EditionType.WEEKEND
     elif weekday in [2, 3, 4]:  # Wed, Thu, Fri
         return EditionType.DAILY
-    else:                 # Saturday, Sunday
+    else:                 # Saturday, Monday (TEMPORARY - normally just Saturday)
         return None
 
 

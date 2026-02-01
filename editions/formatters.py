@@ -92,17 +92,18 @@ class WeekendFormatter(EditionFormatter):
 # =============================================================================
 
 class WeeklyFormatter(EditionFormatter):
-    """Formatter for weekly flagship edition (Monday)."""
-    
+    """Formatter for weekly flagship edition (Sunday)."""  # TEMPORARY - normally Monday
+
     def format_header(self, target_date: date, article_count: int = 7) -> str:
         date_str = target_date.strftime("%d %B %Y")
-        
-        # Calculate week range
-        week_end = target_date - timedelta(days=1)  # Sunday
-        week_start = week_end - timedelta(days=6)   # Previous Monday
-        
+
+        # TEMPORARY: Calculate week range for Sunday publication
+        # Sunday is the end of the week, so week_end is same day (Saturday before)
+        week_end = target_date - timedelta(days=1)  # Saturday (TEMPORARY - normally target_date - 1 for Sunday)
+        week_start = week_end - timedelta(days=6)   # Previous Sunday
+
         # Get ISO week number
-        week_num = target_date.isocalendar()[1] - 1  # Previous week
+        week_num = target_date.isocalendar()[1]  # Current week (TEMPORARY - normally -1 for previous week)
         
         # Format week range
         if week_start.month == week_end.month:

@@ -120,7 +120,7 @@ def get_dates_for_edition(edition_type: EditionType, target_date: date) -> List[
     Schedule:
     - Daily (Wed/Thu/Fri): Same day only
     - Weekend (Tuesday): Sat, Sun, Mon (3 days with no daily editions)
-    - Weekly (Monday): Previous 7 days (Mon-Sun)
+    - Weekly (Sunday): Previous 7 days (Mon-Sun)  # TEMPORARY - normally Monday
     """
     if edition_type == EditionType.DAILY:
         # Same day
@@ -129,10 +129,10 @@ def get_dates_for_edition(edition_type: EditionType, target_date: date) -> List[
         # Tuesday covers: Saturday (-3), Sunday (-2), Monday (-1)
         return [target_date - timedelta(days=i) for i in range(3, 0, -1)]
     elif edition_type == EditionType.WEEKLY:
-        # Monday covers: Previous Mon-Sun (days -7 to -1)
+        # TEMPORARY: Sunday covers: Previous Mon-Sun (days -7 to -1)
+        # (normally Monday would cover previous Mon-Sun)
         return [target_date - timedelta(days=i) for i in range(7, 0, -1)]
     return [target_date]
-
 
 # =============================================================================
 # Candidate Fetching
