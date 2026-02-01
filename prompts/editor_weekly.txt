@@ -6,63 +6,57 @@ COVERAGE PERIOD: Previous 7 days ({week_start} to {week_end})
 
 === FLAGSHIP EDITION CONTEXT ===
 
-The Weekly Edition is ADUmedia's most prestigious digest. It represents the BEST of the entire week's architecture news. This edition:
+The Weekly Edition is ADUmedia's most prestigious digest. It represents the BEST of the entire week's architecture news.
 
-- Reaches readers who only follow weekly digests
-- Can include 2-3 "repeats" from daily editions (truly exceptional articles)
-- Should feature 4-5 NEW articles (hidden gems that didn't make daily cuts)
-- Sets the standard for architecture journalism quality
+Your goal: Select the 7 most significant architecture articles from the past week.
 
-=== COMPOSITION REQUIREMENTS ===
+=== SELECTION CRITERIA (in priority order) ===
 
-MANDATORY MIX:
-- 2-3 REPEAT articles: The week's most significant stories (already in daily editions)
-- 4-5 NEW articles: Important content that didn't make daily editions
+1. ARCHITECTURAL SIGNIFICANCE
+   - Major completed projects by renowned architects
+   - Significant new building announcements
+   - Award-winning designs
+   - Landmark or culturally important structures
 
-This mix ensures:
-- Top stories get deserved wider audience (repeats)
-- Fresh discoveries for daily edition followers (new)
+2. NEWS VALUE & IMPACT
+   - Breaking news and timely announcements
+   - Competition results and winners
+   - Industry awards and recognition
+   - Policy changes affecting architecture
+   - Stories with lasting impact beyond the daily news cycle
 
-=== SELECTION CRITERIA ===
+3. GEOGRAPHIC DIVERSITY
+   - Aim for variety across continents/regions
+   - Do not select more than 2 articles from the same country
+   - Prioritize underrepresented regions when quality is equal
 
-FOR REPEAT ARTICLES (2-3 maximum):
-1. Week's most significant architectural developments
-2. Stories with lasting impact beyond daily news cycle
-3. Projects that define the week in architecture
-4. Only select if truly exceptional - not just "good"
+4. SOURCE DIVERSITY
+   - Maximum 2 articles from any single source
+   - Prefer variety across publications
+   - Balance major outlets with specialized ones
 
-FOR NEW ARTICLES (4-5 minimum):
-1. Hidden gems - quality articles that missed daily cuts
-2. Important projects from smaller/regional sources
-3. In-depth features better suited for weekend reading
-4. Thoughtful criticism and opinion pieces
+5. CONTENT TYPE BALANCE
+   - Mix of project features, news, interviews, and criticism
+   - Avoid selecting 3+ articles of the same type
+   - Include at least one significant project feature
 
-GENERAL CRITERIA:
-1. Architectural significance and lasting importance
-2. Geographic diversity across the week
-3. Source diversity - showcase range of publications
-4. Content type balance (projects, news, interviews, criticism)
-5. Visual quality and presentation
+6. VISUAL QUALITY
+   - Prefer articles with strong hero images
+   - Visual appeal matters for engagement
 
 === EXCLUSION RULES ===
 
-- No article can appear in Weekly Edition more than once per month
-- Skip articles with incomplete summaries
-- Avoid selecting 2+ articles about the same project/story
+- Skip articles with incomplete or missing summaries
+- Avoid duplicate coverage of the same project/story from different sources
+- No article can appear in Weekly Edition more than once per month (check below)
 
 === AVAILABLE CANDIDATES (Full Week) ===
 
 {candidates_json}
 
-=== ALREADY PUBLISHED IN DAILY EDITIONS THIS WEEK ===
-
-These can be selected as "repeats" if exceptional:
-
-{daily_published_this_week}
-
 === PREVIOUSLY PUBLISHED IN WEEKLY EDITIONS (LAST 30 DAYS) ===
 
-Do NOT repeat these:
+Do NOT select these again:
 
 {recent_weekly_urls}
 
@@ -75,29 +69,13 @@ Return ONLY a valid JSON object with exactly this structure:
         {{
             "id": "source_001",
             "title": "Article title for reference",
-            "reason": "Brief 10-15 word rationale - why this deserves weekly spotlight",
+            "reason": "Brief 10-15 word rationale for selection",
             "category": "project|news|interview|competition|award|opinion|criticism",
-            "is_repeat": true,
-            "repeat_from_date": "2026-01-15",
             "significance_score": 9
-        }},
-        {{
-            "id": "source_002",
-            "title": "Another article title",
-            "reason": "Hidden gem rationale - why this deserved wider audience",
-            "category": "project",
-            "is_repeat": false,
-            "repeat_from_date": null,
-            "significance_score": 8
         }},
         ... (exactly 7 articles total)
     ],
     "edition_summary": "One sentence (max 15 words) - the week's defining theme",
-    "weekly_stats": {{
-        "repeated_count": 2,
-        "new_count": 5,
-        "repeat_justification": "Brief explanation of why these 2 deserve repetition"
-    }},
     "selection_stats": {{
         "total_candidates": 150,
         "geographic_spread": ["Country1", "Country2", ...],
@@ -114,13 +92,13 @@ Rate each article 1-10 on architectural significance:
 - 4-5: Good content but not week-defining
 - 1-3: Standard daily news, not weekly material
 
+Aim for articles scoring 7+ to maintain the flagship quality standard.
+
 === IMPORTANT NOTES ===
 
 - Do NOT use any emoji in your output
 - The Weekly Edition is the flagship - quality bar is highest
-- "is_repeat" must accurately reflect if article was in a daily edition
-- "repeat_from_date" must be the actual date it was published (or null)
 - significance_score helps justify your selections
 - Categories: project, news, interview, competition, award, opinion, criticism
-- Maximum 3 repeats - if you select more, justify exceptionally well
 - This edition shapes how the architecture community remembers the week
+- Focus on the 7 BEST articles, regardless of when they were published this week

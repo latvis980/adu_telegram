@@ -230,14 +230,21 @@ async def select_articles(
 
     selector = ArticleSelector()
 
-    # Get cross-edition data for Weekly edition
-    daily_published_this_week = []
+    # Get recent weekly URLs for exclusion (weekly edition only)
+    recent_weekly_urls = []
     if edition_type == EditionType.WEEKLY:
-        daily_published_this_week = dedup.get_daily_published_for_weekly(
-            week_start=target_date - timedelta(days=7),
-            week_end=target_date - timedelta(days=1)
-        )
-        print(f"   Daily published this week: {len(daily_published_this_week)}")
+        # Get URLs from weekly editions in the last 30 days
+        try:
+            result = dedup.client.table("all_articles")\
+                .select("article_url")\
+                .contains("selected_for_editions", ["weekly"])\
+                .gte("fetch_date", (target_date - timedelta(days=30)).isoformat())\
+                .execute()
+
+            recent_weekly_urls = [row["article_url"] for row in result.data if row.get("article_url")]
+            print(f"   Recent weekly URLs (exclude): {len(recent_weekly_urls)}")
+        except Exception as e:
+            print(f"   [WARN] Could not fetch recent weekly URLs: {e}")
 
     # Run AI selection
     # Note: We pass empty published_urls since we're using project-based dedup now
@@ -247,7 +254,7 @@ async def select_articles(
         edition_type=edition_type,
         candidates=candidates,
         published_urls=published_urls,
-        daily_published_this_week=daily_published_this_week,
+        recent_weekly_urls=recent_weekly_urls,
         target_date=target_date
     )
 

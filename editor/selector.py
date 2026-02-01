@@ -255,7 +255,6 @@ class ArticleSelector:
     def _build_weekly_prompt(
         self,
         candidates: List[Dict[str, Any]],
-        daily_published_this_week: List[Dict[str, str]],
         recent_weekly_urls: List[str],
         target_date: date
     ) -> str:
@@ -266,19 +265,11 @@ class ArticleSelector:
         week_end = target_date - timedelta(days=1)  # Sunday
         week_start = week_end - timedelta(days=6)   # Previous Monday
 
-        # Format daily published as readable list
-        daily_list = []
-        for item in daily_published_this_week:
-            daily_list.append(f"- [{item.get('date', 'unknown')}] {item.get('title', 'No title')[:80]}")
-            daily_list.append(f"  URL: {item.get('url', '')}")
-        daily_formatted = "\n".join(daily_list) if daily_list else "(no daily editions this week)"
-
         return template.format(
             current_date=target_date.strftime("%A, %B %d, %Y"),
             week_start=week_start.strftime("%B %d"),
             week_end=week_end.strftime("%B %d, %Y"),
             candidates_json=self._format_candidates_for_prompt(candidates),
-            daily_published_this_week=daily_formatted,
             recent_weekly_urls=self._format_urls_list(recent_weekly_urls),
         )
 
@@ -437,38 +428,37 @@ class ArticleSelector:
     async def select_weekly(
         self,
         candidates: List[Dict[str, Any]],
-        daily_published_this_week: List[Dict[str, str]],
-        recent_weekly_urls: List[str],
+        recent_weekly_urls: Optional[List[str]] = None,
         target_date: Optional[date] = None,
         run_name: Optional[str] = None
     ) -> EditorSelection:
         """
         Select articles for weekly flagship edition (Monday).
 
-        OPTIMIZED: Handles large candidate sets (300+) with aggressive token reduction.
+        SIMPLIFIED: Just picks the 7 best articles from the week, period.
+        Excludes articles from recent weekly editions to avoid repetition.
 
         Args:
             candidates: All candidates from the past 7 days
-            daily_published_this_week: Articles published in daily editions
-                Format: [{"url": "...", "title": "...", "date": "YYYY-MM-DD"}, ...]
-            recent_weekly_urls: URLs from recent weekly editions (last 30 days)
+            recent_weekly_urls: URLs from recent weekly editions (last 30 days) to exclude
             target_date: Target date (defaults to today, should be Monday)
             run_name: Optional name for LangSmith trace
 
         Returns:
-            EditorSelection with 7 selected articles (mix of repeats and new)
+            EditorSelection with 7 selected articles
         """
         if target_date is None:
             target_date = date.today()
 
+        if recent_weekly_urls is None:
+            recent_weekly_urls = []
+
         print(f"\n🏆 [EDITOR] Selecting WEEKLY edition for {target_date}")
         print(f"   Candidates (7 days): {len(candidates)}")
-        print(f"   In daily editions: {len(daily_published_this_week)}")
-        print(f"   Recent weekly (exclude): {len(recent_weekly_urls)}")
+        if recent_weekly_urls:
+            print(f"   Recent weekly (exclude): {len(recent_weekly_urls)}")
 
-        prompt = self._build_weekly_prompt(
-            candidates, daily_published_this_week, recent_weekly_urls, target_date
-        )
+        prompt = self._build_weekly_prompt(candidates, recent_weekly_urls, target_date)
 
         # Estimate tokens - weekly prompts are LARGE
         estimated_tokens = len(prompt) // 4 + 2500  # Larger response for weekly
@@ -482,7 +472,6 @@ class ArticleSelector:
                 "edition_type": "weekly",
                 "target_date": target_date.isoformat(),
                 "candidate_count": len(candidates),
-                "daily_published_count": len(daily_published_this_week),
             }
         )
 
@@ -510,8 +499,6 @@ class ArticleSelector:
             selection = EditorSelection(**result)
 
             print(f"   ✅ [OK] Selected {len(selection.selected)} articles")
-            if selection.weekly_stats:
-                print(f"   Repeats: {selection.weekly_stats.repeated_count}, New: {selection.weekly_stats.new_count}")
             print(f"   Summary: {selection.edition_summary}")
 
             # Print rate limiter stats after weekly (important to see)
@@ -566,7 +553,6 @@ class ArticleSelector:
         elif edition_type == EditionType.WEEKLY:
             return await self.select_weekly(
                 candidates=candidates,
-                daily_published_this_week=daily_published_this_week or [],
                 recent_weekly_urls=recent_weekly_urls or [],
                 target_date=target_date
             )
