@@ -120,7 +120,12 @@ def get_dates_for_edition(edition_type: EditionType, target_date: date) -> List[
     Schedule:
     - Daily (Wed/Thu/Fri): Same day only
     - Weekend (Tuesday): Sat, Sun, Mon (3 days with no daily editions)
-    - Weekly (Sunday): Previous 7 days (Mon-Sun)  # TEMPORARY - normally Monday
+    - Weekly: Previous 7 days (Mon-Sun)
+      * TEMPORARY: Testing on Sunday (see selector.py determine_edition_type)
+      * NORMAL: Runs on Monday (see selector.py determine_edition_type)
+
+    Note: This function works the same for both Sunday and Monday.
+    The day selection is controlled in selector.py's determine_edition_type().
     """
     if edition_type == EditionType.DAILY:
         # Same day
@@ -129,10 +134,11 @@ def get_dates_for_edition(edition_type: EditionType, target_date: date) -> List[
         # Tuesday covers: Saturday (-3), Sunday (-2), Monday (-1)
         return [target_date - timedelta(days=i) for i in range(3, 0, -1)]
     elif edition_type == EditionType.WEEKLY:
-        # TEMPORARY: Sunday covers: Previous Mon-Sun (days -7 to -1)
-        # (normally Monday would cover previous Mon-Sun)
+        # Weekly covers: Previous 7 days (Mon-Sun)
+        # Works for both Sunday testing and Monday normal operation
         return [target_date - timedelta(days=i) for i in range(7, 0, -1)]
     return [target_date]
+
 
 # =============================================================================
 # Candidate Fetching
@@ -600,8 +606,17 @@ async def run_publisher(
                 edition_type, target_date, len(candidates), edition_summary
             )
 
+        # Print final statistics
+        from utils.rate_limiter import get_rate_limiter
+        limiter = get_rate_limiter()
+
         print(f"\n{'=' * 60}")
-        print("[DONE]")
+        print("[DONE] Publishing Complete")
+        print(f"{'=' * 60}")
+        print(f"Edition: {edition_name}")
+        print(f"Articles sent: {results['sent']}")
+        print(f"Total candidates processed: {len(candidates)}")
+        limiter.print_stats()
         print(f"{'=' * 60}")
 
     except Exception as e:

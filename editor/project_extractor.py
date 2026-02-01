@@ -21,10 +21,16 @@ import hashlib
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from datetime import date
+import asyncio
 
 from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
+
+# Import rate limiter
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from utils.rate_limiter import get_rate_limiter, retry_on_rate_limit
 
 
 # =============================================================================
@@ -102,10 +108,13 @@ class ProjectExtractor:
             model_kwargs={"response_format": {"type": "json_object"}}
         )
 
+        # Get global rate limiter
+        self.rate_limiter = get_rate_limiter()
+
         # Load prompt template
         self.prompt_template = self._load_prompt()
 
-        print(f"[EXTRACTOR] Initialized with {model}")
+        print(f"[EXTRACTOR] Initialized with {model} and rate limiting")
 
     def _load_prompt(self) -> str:
         """Load the extraction prompt template."""
@@ -214,6 +223,9 @@ Building: {{"topic_type": "building", "project_name": "The Spiral", "architect":
             url=url
         )
 
+        # Estimate tokens (rough: prompt + response)
+        estimated_tokens = len(prompt) // 4 + 500  # ~500 tokens for response
+
         # Configure run metadata
         config = RunnableConfig(
             run_name=run_name or f"extract-{source_name[:10]}",
@@ -225,9 +237,24 @@ Building: {{"topic_type": "building", "project_name": "The Spiral", "architect":
         )
 
         try:
-            # Call LLM
-            messages = [("human", prompt)]
-            response = await self.llm.ainvoke(messages, config=config)
+            # Use rate limiter
+            async with self.rate_limiter.acquire(estimated_tokens):
+                # Call LLM with retry on rate limit
+                messages = [("human", prompt)]
+
+                async def _call_llm():
+                    return await self.llm.ainvoke(messages, config=config)
+
+                response = await retry_on_rate_limit(_call_llm)
+
+                # Record actual token usage if available
+                if hasattr(response, 'response_metadata'):
+                    usage = response.response_metadata.get('token_usage', {})
+                    total_tokens = usage.get('total_tokens', estimated_tokens)
+                    self.rate_limiter.record_usage(total_tokens)
+                else:
+                    # Fallback to estimate
+                    self.rate_limiter.record_usage(estimated_tokens)
 
             # Parse response
             result = json.loads(response.content)
@@ -266,29 +293,32 @@ Building: {{"topic_type": "building", "project_name": "The Spiral", "architect":
     async def extract_batch(
         self,
         articles: List[Dict[str, Any]],
-        batch_size: int = 10
+        batch_size: int = 5  # Reduced from 10 to 5 for better rate limit handling
     ) -> List[ExtractedProject]:
         """
         Extract topic info from multiple articles.
 
         Args:
             articles: List of article dicts with summary, title, source_name
-            batch_size: Number of concurrent extractions
+            batch_size: Number of concurrent extractions (reduced to 5 for rate limits)
 
         Returns:
             List of ExtractedProject results (same order as input)
         """
-        import asyncio
-
         results = []
+        total_batches = (len(articles) + batch_size - 1) // batch_size
 
-        for i in range(0, len(articles), batch_size):
+        print(f"[EXTRACTOR] Processing {len(articles)} articles in {total_batches} batches of {batch_size}")
+
+        for batch_num, i in enumerate(range(0, len(articles), batch_size), 1):
             batch = articles[i:i + batch_size]
+
+            print(f"   📦 Batch {batch_num}/{total_batches} ({len(batch)} articles)...")
 
             # Create tasks for batch
             tasks = [
                 self.extract(
-                    summary=article.get("ai_summary", ""),
+                    summary=article.get("ai_summary", "")[:300],  # Truncate summaries to save tokens
                     title=article.get("title", ""),
                     source_name=article.get("source_name", "Unknown"),
                     url=article.get("link", "")
@@ -302,7 +332,7 @@ Building: {{"topic_type": "building", "project_name": "The Spiral", "architect":
             # Handle results
             for j, result in enumerate(batch_results):
                 if isinstance(result, Exception):
-                    print(f"[EXTRACTOR] Batch item {i+j} failed: {result}")
+                    print(f"      ❌ Batch item {i+j} failed: {result}")
                     # Still create a trackable fallback
                     article = batch[j]
                     results.append(ExtractedProject(
@@ -317,7 +347,15 @@ Building: {{"topic_type": "building", "project_name": "The Spiral", "architect":
                 else:
                     results.append(result)
 
-            print(f"   [EXTRACTOR] Processed {min(i + batch_size, len(articles))}/{len(articles)} articles")
+            print(f"      ✅ Processed {min(i + batch_size, len(articles))}/{len(articles)} articles")
+
+            # Add a small delay between batches to prevent rate limit spikes
+            if batch_num < total_batches:
+                await asyncio.sleep(0.5)
+
+        # Print rate limiter stats
+        print(f"\n[EXTRACTOR] Completed extraction:")
+        self.rate_limiter.print_stats()
 
         return results
 

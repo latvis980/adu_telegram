@@ -30,6 +30,11 @@ from langchain_openai import ChatOpenAI
 from langchain_core.runnables import RunnableConfig
 from pydantic import BaseModel, Field
 
+# Import rate limiter
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+from utils.rate_limiter import get_rate_limiter, retry_on_rate_limit
+
 
 # =============================================================================
 # Configuration
@@ -41,8 +46,8 @@ PROJECT_COOLDOWN_MONTHS = 3
 # Minimum confidence for AI match
 MATCH_CONFIDENCE_THRESHOLD = 0.75
 
-# How many recent topics to check against
-MAX_PROJECTS_TO_CHECK = 100
+# How many recent topics to check against (increased for monthly news cycle)
+MAX_PROJECTS_TO_CHECK = 1000  # Increased from 100 to 1000 for monthly coverage
 
 
 # =============================================================================
@@ -104,10 +109,14 @@ class DeduplicationChecker:
             model_kwargs={"response_format": {"type": "json_object"}}
         )
 
+        # Get global rate limiter
+        self.rate_limiter = get_rate_limiter()
+
         # Load prompt template
         self.match_prompt = self._load_match_prompt()
 
-        print("[DEDUP] Connected to Supabase with AI matching")
+        print(f"[DEDUP] Connected to Supabase with AI matching and rate limiting")
+        print(f"[DEDUP] Checking against {MAX_PROJECTS_TO_CHECK} recent projects")
 
     def _load_match_prompt(self) -> str:
         """Load the topic matching prompt template."""
@@ -193,18 +202,21 @@ Match if: confidence >= 0.75"""
         if not existing_projects:
             return None, 0.0, "No published topics in database"
 
-        # Format existing topics for prompt
+        # Format existing topics for prompt - MINIMIZE TOKEN USAGE
         projects_for_prompt = []
         for p in existing_projects:
+            # Only include essential fields, truncate long values
             projects_for_prompt.append({
                 "id": p["id"],
-                "project_name": p.get("project_name", ""),
-                "architect": p.get("architect", ""),
-                "location_city": p.get("location_city", ""),
-                "location_country": p.get("location_country", ""),
-                "last_published_date": p.get("last_published_date", ""),
-                "topic_type": p.get("topic_type", "building"),
+                "project_name": (p.get("project_name", "") or "")[:100],  # Truncate long names
+                "architect": (p.get("architect", "") or "")[:80],  # Truncate
+                "location": f"{p.get('location_city', '') or ''}, {p.get('location_country', '') or ''}".strip(", ")[:80],
+                "last_pub": (p.get("last_published_date", "") or "")[:10],  # Just date, no time
+                "type": (p.get("topic_type", "") or "building")[:20],
             })
+
+        # Truncate summary_excerpt to save tokens
+        summary_short = (summary_excerpt or "")[:150]
 
         # Build prompt
         prompt = self.match_prompt.format(
@@ -212,9 +224,12 @@ Match if: confidence >= 0.75"""
             new_project_name=project_name or "Unknown",
             new_architect=architect or "Unknown",
             new_location=location or "Unknown",
-            new_summary_excerpt=(summary_excerpt or "")[:200],
-            existing_projects_json=json.dumps(projects_for_prompt, indent=2)
+            new_summary_excerpt=summary_short,
+            existing_projects_json=json.dumps(projects_for_prompt, indent=None)  # No indentation to save tokens
         )
+
+        # Estimate tokens
+        estimated_tokens = len(prompt) // 4 + 300  # ~300 tokens for response
 
         # Configure run metadata
         config = RunnableConfig(
@@ -229,24 +244,37 @@ Match if: confidence >= 0.75"""
         )
 
         try:
-            # Call LLM
-            messages = [("human", prompt)]
-            response = await self.llm.ainvoke(messages, config=config)
+            # Use rate limiter
+            async with self.rate_limiter.acquire(estimated_tokens):
+                # Call LLM with retry on rate limit
+                messages = [("human", prompt)]
+
+                async def _call_llm():
+                    return await self.llm.ainvoke(messages, config=config)
+
+                response = await retry_on_rate_limit(_call_llm)
+
+                # Record actual token usage if available
+                if hasattr(response, 'response_metadata'):
+                    usage = response.response_metadata.get('token_usage', {})
+                    total_tokens = usage.get('total_tokens', estimated_tokens)
+                    self.rate_limiter.record_usage(total_tokens)
+                else:
+                    self.rate_limiter.record_usage(estimated_tokens)
 
             # Parse response
             result = json.loads(response.content)
             match = ProjectMatch(**result)
 
             if match.match_found and match.confidence >= MATCH_CONFIDENCE_THRESHOLD:
-                print(f"[DEDUP] AI Match: {project_name} -> {match.matched_project_id} "
-                      f"(confidence: {match.confidence:.2f})")
+                print(f"   ✅ [DEDUP] AI Match: {project_name} -> {match.matched_project_id[:8]}... "
+                      f"(conf: {match.confidence:.2f})")
                 return match.matched_project_id, match.confidence, match.match_reason
             else:
-                print(f"[DEDUP] No AI match for: {project_name} (confidence: {match.confidence:.2f})")
                 return None, match.confidence, match.match_reason
 
         except Exception as e:
-            print(f"[DEDUP] AI matching error: {e}")
+            print(f"   ❌ [DEDUP] AI matching error: {e}")
             return None, 0.0, f"Error: {e}"
 
     def _get_published_projects(self, limit: int = MAX_PROJECTS_TO_CHECK) -> List[Dict[str, Any]]:
@@ -816,66 +844,81 @@ Match if: confidence >= 0.75"""
         duplicates = []
         updates = []
 
-        print(f"[DEDUP] Filtering {len(candidates)} candidates against published topics...")
+        print(f"\n📊 [DEDUP] Filtering {len(candidates)} candidates against published topics...")
 
-        for candidate in candidates:
-            # First check: URL already published?
-            url = candidate.get("link", "")
-            if url and self.is_url_published(url):
-                candidate["_duplicate_reason"] = "URL already published"
-                duplicates.append(candidate)
-                continue
+        # Process in smaller batches to show progress
+        batch_size = 50
+        total_batches = (len(candidates) + batch_size - 1) // batch_size
 
-            # Get extracted topic info
-            extracted = candidate.get("_extracted_info", {})
+        for batch_num, i in enumerate(range(0, len(candidates), batch_size), 1):
+            batch = candidates[i:i + batch_size]
+            print(f"   📦 Processing batch {batch_num}/{total_batches} ({len(batch)} articles)...")
 
-            # UPDATED: Now we always try to match, not just for is_project=True
-            # The extractor now always provides a project_name for tracking
-            project_name = extracted.get("project_name")
+            for j, candidate in enumerate(batch, 1):
+                # First check: URL already published?
+                url = candidate.get("link", "")
+                if url and self.is_url_published(url):
+                    candidate["_duplicate_reason"] = "URL already published"
+                    duplicates.append(candidate)
+                    continue
 
-            if not project_name:
-                # No topic name extracted - still eligible but can't dedupe
-                # This should rarely happen with the updated extractor
-                print(f"[DEDUP] Warning: No topic name for article: {candidate.get('title', 'Unknown')[:50]}")
-                candidate["_project_id"] = None
-                eligible.append(candidate)
-                continue
+                # Get extracted topic info
+                extracted = candidate.get("_extracted_info", {})
 
-            # Get topic details
-            architect = extracted.get("architect")
-            location = extracted.get("location", {})
-            location_city = location.get("city") if isinstance(location, dict) else None
-            location_country = location.get("country") if isinstance(location, dict) else None
-            topic_type = extracted.get("topic_type", "building")
+                # UPDATED: Now we always try to match, not just for is_project=True
+                # The extractor now always provides a project_name for tracking
+                project_name = extracted.get("project_name")
 
-            # Check if this topic was published before
-            project_id, is_duplicate, last_published = await self.find_existing_project(
-                project_name=project_name,
-                architect=architect,
-                location_city=location_city,
-                location_country=location_country,
-                summary_excerpt=candidate.get("ai_summary", "")[:200],
-                topic_type=topic_type
-            )
+                if not project_name:
+                    # No topic name extracted - still eligible but can't dedupe
+                    # This should rarely happen with the updated extractor
+                    candidate["_project_id"] = None
+                    eligible.append(candidate)
+                    continue
 
-            candidate["_project_id"] = project_id  # Will be None for new topics
-            candidate["_topic_type"] = topic_type  # Store for later use
+                # Get topic details
+                architect = extracted.get("architect")
+                location = extracted.get("location", {})
+                location_city = location.get("city") if isinstance(location, dict) else None
+                location_country = location.get("country") if isinstance(location, dict) else None
+                topic_type = extracted.get("topic_type", "building")
 
-            if is_duplicate:
-                days_ago = (date.today() - last_published).days if last_published else 0
-                candidate["_duplicate_reason"] = f"Topic published {days_ago} days ago on {last_published}"
-                duplicates.append(candidate)
-            elif project_id and last_published:
-                # Published before, but outside cooldown = update
-                candidate["_is_update"] = True
-                candidate["_last_published"] = last_published
-                updates.append(candidate)
-                eligible.append(candidate)  # Updates are eligible
-            else:
-                # Never published = new topic = eligible
-                eligible.append(candidate)
+                # Check if this topic was published before
+                project_id, is_duplicate, last_published = await self.find_existing_project(
+                    project_name=project_name,
+                    architect=architect,
+                    location_city=location_city,
+                    location_country=location_country,
+                    summary_excerpt=candidate.get("ai_summary", "")[:150],  # Truncated
+                    topic_type=topic_type
+                )
 
-        print(f"[DEDUP] Result: {len(eligible)} eligible, {len(duplicates)} duplicates, {len(updates)} updates")
+                candidate["_project_id"] = project_id  # Will be None for new topics
+                candidate["_topic_type"] = topic_type  # Store for later use
+
+                if is_duplicate:
+                    days_ago = (date.today() - last_published).days if last_published else 0
+                    candidate["_duplicate_reason"] = f"Topic published {days_ago} days ago on {last_published}"
+                    duplicates.append(candidate)
+                elif project_id and last_published:
+                    # Published before, but outside cooldown = update
+                    candidate["_is_update"] = True
+                    candidate["_last_published"] = last_published
+                    updates.append(candidate)
+                    eligible.append(candidate)  # Updates are eligible
+                else:
+                    # Never published = new topic = eligible
+                    eligible.append(candidate)
+
+            print(f"      ✅ Batch {batch_num}/{total_batches} complete")
+
+        print(f"\n📊 [DEDUP] Filtering complete:")
+        print(f"   ✅ Eligible: {len(eligible)}")
+        print(f"   ❌ Duplicates: {len(duplicates)}")
+        print(f"   🔄 Updates: {len(updates)}")
+
+        # Print rate limiter stats
+        self.rate_limiter.print_stats()
 
         return eligible, duplicates, updates
 
