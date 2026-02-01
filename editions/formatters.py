@@ -22,17 +22,25 @@ class EditionFormatter(ABC):
     
     @abstractmethod
     def format_header(self, target_date: date, article_count: int = 7) -> str:
-        """
-        Format the edition header message.
-        
-        Args:
-            target_date: Publication date
-            article_count: Number of articles in this edition
-            
-        Returns:
-            Formatted header string
-        """
-        pass
+        date_str = target_date.strftime("%d %B %Y")
+
+        # Calculate week range
+        week_end = target_date - timedelta(days=1)  # Sunday
+        week_start = week_end - timedelta(days=6)   # Previous Monday
+
+        # Get ISO week number
+        week_num = target_date.isocalendar()[1] - 1  # Previous week
+
+        # Format week range
+        if week_start.month == week_end.month:
+            week_range = f"{week_start.day}-{week_end.day} {week_end.strftime('%B')}"
+        else:
+            week_range = f"{week_start.strftime('%d %b')} - {week_end.strftime('%d %b')}"
+
+        return (
+            f"{date_str}\n"
+            f"The Week in Architecture: Best of Week {week_num} ({week_range})."
+        )
     
     @abstractmethod
     def get_edition_name(self) -> str:
@@ -92,7 +100,7 @@ class WeekendFormatter(EditionFormatter):
 # =============================================================================
 
 class WeeklyFormatter(EditionFormatter):
-    """Formatter for weekly flagship edition (Sunday)."""  # TEMPORARY - normally Monday
+    """Formatter for weekly flagship edition (Monday)."""
 
     def format_header(self, target_date: date, article_count: int = 7) -> str:
         date_str = target_date.strftime("%d %B %Y")

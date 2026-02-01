@@ -586,12 +586,12 @@ def determine_edition_type(target_date: Optional[date] = None) -> Optional[Editi
     # ==========================================================================
 
     # TEMPORARY - Sunday weekly edition (for testing)
-    if weekday == 6:      # Sunday
-        return EditionType.WEEKLY
+    # if weekday == 6:      # Sunday
+    #     return EditionType.WEEKLY
 
     # NORMAL - Monday weekly edition (restore this when testing is done)
-    # if weekday == 0:      # Monday
-    #     return EditionType.WEEKLY
+    if weekday == 0:      # Monday
+        return EditionType.WEEKLY
 
     # ==========================================================================
 

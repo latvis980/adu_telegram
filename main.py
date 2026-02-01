@@ -121,7 +121,6 @@ def get_dates_for_edition(edition_type: EditionType, target_date: date) -> List[
     - Daily (Wed/Thu/Fri): Same day only
     - Weekend (Tuesday): Sat, Sun, Mon (3 days with no daily editions)
     - Weekly: Previous 7 days (Mon-Sun)
-      * TEMPORARY: Testing on Sunday (see selector.py determine_edition_type)
       * NORMAL: Runs on Monday (see selector.py determine_edition_type)
 
     Note: This function works the same for both Sunday and Monday.
