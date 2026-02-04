@@ -59,7 +59,7 @@ class DailyFormatter(EditionFormatter):
         date_str = target_date.strftime("%d %B %Y")
         return (
             f"{date_str}\n"
-            f"Our editorial selection for today."
+            f"Our editorial selection for today -- Daily Edition"
         )
     
     def get_edition_name(self) -> str:
@@ -88,7 +88,8 @@ class WeekendFormatter(EditionFormatter):
         
         return (
             f"{date_str}\n"
-            f"Weekend Catch-Up: Top stories from {coverage}."
+            f"Our editorial selection for today -- Weekend Catch-Up\n"
+            f"Top stories from {coverage}."
         )
     
     def get_edition_name(self) -> str:
@@ -121,7 +122,8 @@ class WeeklyFormatter(EditionFormatter):
         
         return (
             f"{date_str}\n"
-            f"The Week in Architecture: Best of Week {week_num} ({week_range})."
+            f"Our editorial selection for today -- Weekly Edition\n"
+            f"Best of Week {week_num} ({week_range})."
         )
     
     def get_edition_name(self) -> str:

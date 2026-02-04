@@ -20,6 +20,7 @@ import re
 import asyncio
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 from telegram import Bot
 from telegram.constants import ParseMode
 from telegram.error import TelegramError, RetryAfter, TimedOut, NetworkError
@@ -45,6 +46,17 @@ BASE_RETRY_DELAY: float = 5.0
 
 # Maximum delay between retries (seconds)
 MAX_RETRY_DELAY: float = 120.0
+
+
+# =============================================================================
+# Edition Type Labels (for header formatting)
+# =============================================================================
+
+EDITION_LABELS = {
+    "daily": "Daily Edition",
+    "weekend": "Weekend Catch-Up",
+    "weekly": "Weekly Edition",
+}
 
 
 class TelegramBot:
@@ -104,7 +116,7 @@ class TelegramBot:
         send_func,
         max_retries: int = MAX_RETRIES,
         **kwargs
-    ) -> bool:
+    ) -> Optional[object]:
         """
         Send a message with automatic retry on rate limit errors.
 
@@ -114,7 +126,7 @@ class TelegramBot:
             **kwargs: Keyword arguments for send_func
 
         Returns:
-            True if message sent successfully, False otherwise
+            The Message object if sent successfully, None otherwise
         """
         # Wait for rate limit before attempting
         await self._wait_for_rate_limit()
@@ -123,9 +135,9 @@ class TelegramBot:
 
         for attempt in range(max_retries + 1):
             try:
-                await send_func(**kwargs)
+                result = await send_func(**kwargs)
                 self._message_count += 1
-                return True
+                return result
 
             except RetryAfter as e:
                 # Telegram is telling us to wait
@@ -155,7 +167,7 @@ class TelegramBot:
                     last_error = e
                 else:
                     print(f"   [ERROR] Timeout after {max_retries + 1} attempts")
-                    return False
+                    return None
 
             except NetworkError as e:
                 # Network error - retry with backoff
@@ -166,16 +178,16 @@ class TelegramBot:
                     last_error = e
                 else:
                     print(f"   [ERROR] Network error after {max_retries + 1} attempts: {e}")
-                    return False
+                    return None
 
             except TelegramError as e:
                 # Other Telegram errors
                 print(f"   [ERROR] Telegram error: {e}")
-                return False
+                return None
 
         # If we get here, all retries failed
         print(f"   [ERROR] Failed after {max_retries + 1} attempts: {last_error}")
-        return False
+        return None
 
     def print_flood_stats(self) -> None:
         """Print flood control statistics."""
@@ -241,7 +253,7 @@ class TelegramBot:
         text: str, 
         parse_mode: str = ParseMode.HTML,  # Changed from MARKDOWN
         disable_preview: bool = False
-    ) -> bool:
+    ) -> Optional[int]:
         """
         Send a single message to the channel with flood control.
 
@@ -251,10 +263,10 @@ class TelegramBot:
             disable_preview: Disable link preview
 
         Returns:
-            True if sent successfully
+            message_id if sent successfully, None otherwise
         """
         # Try with formatting first
-        success = await self._send_with_retry(
+        result = await self._send_with_retry(
             self.bot.send_message,
             chat_id=self.channel_id,
             text=text,
@@ -262,18 +274,20 @@ class TelegramBot:
             disable_web_page_preview=disable_preview
         )
 
-        if success:
-            return True
+        if result:
+            return result.message_id
 
         # Fallback: try without formatting
         print("   [INFO] Retrying without Markdown formatting...")
-        return await self._send_with_retry(
+        result = await self._send_with_retry(
             self.bot.send_message,
             chat_id=self.channel_id,
             text=text,
             parse_mode=None,
             disable_web_page_preview=disable_preview
         )
+
+        return result.message_id if result else None
 
     async def send_photo(
         self,
@@ -293,7 +307,7 @@ class TelegramBot:
             True if sent successfully
         """
         # Try with formatting first
-        success = await self._send_with_retry(
+        result = await self._send_with_retry(
             self.bot.send_photo,
             chat_id=self.channel_id,
             photo=photo_url,
@@ -301,18 +315,85 @@ class TelegramBot:
             parse_mode=parse_mode
         )
 
-        if success:
+        if result:
             return True
 
         # Fallback: try without formatting
         print("   [INFO] Retrying photo without HTML formatting...")
-        return await self._send_with_retry(
+        result = await self._send_with_retry(
             self.bot.send_photo,
             chat_id=self.channel_id,
             photo=photo_url,
             caption=caption,
             parse_mode=None
         )
+
+        return result is not None
+
+    # =========================================================================
+    # Pin / Unpin
+    # =========================================================================
+
+    async def pin_message(self, message_id: int, disable_notification: bool = True) -> bool:
+        """
+        Pin a message in the channel.
+
+        Requires the bot to be an admin with 'can_edit_messages' right in the channel.
+
+        Args:
+            message_id: ID of the message to pin
+            disable_notification: If True, no notification is sent to subscribers
+
+        Returns:
+            True if pinned successfully
+        """
+        try:
+            await self.bot.pin_chat_message(
+                chat_id=self.channel_id,
+                message_id=message_id,
+                disable_notification=disable_notification
+            )
+            print(f"   [PIN] Pinned message {message_id}")
+            return True
+        except TelegramError as e:
+            print(f"   [PIN] Failed to pin message {message_id}: {e}")
+            return False
+
+    async def unpin_message(self, message_id: int) -> bool:
+        """
+        Unpin a specific message in the channel.
+
+        Args:
+            message_id: ID of the message to unpin
+
+        Returns:
+            True if unpinned successfully
+        """
+        try:
+            await self.bot.unpin_chat_message(
+                chat_id=self.channel_id,
+                message_id=message_id
+            )
+            print(f"   [UNPIN] Unpinned message {message_id}")
+            return True
+        except TelegramError as e:
+            print(f"   [UNPIN] Failed to unpin message {message_id}: {e}")
+            return False
+
+    async def unpin_all_messages(self) -> bool:
+        """
+        Unpin all messages in the channel.
+
+        Returns:
+            True if unpinned successfully
+        """
+        try:
+            await self.bot.unpin_all_chat_messages(chat_id=self.channel_id)
+            print(f"   [UNPIN] Unpinned all messages")
+            return True
+        except TelegramError as e:
+            print(f"   [UNPIN] Failed to unpin all messages: {e}")
+            return False
 
     # =========================================================================
     # Digest Sending
@@ -321,7 +402,8 @@ class TelegramBot:
     async def send_digest(
         self, 
         articles: list[dict],
-        include_header: bool = True
+        include_header: bool = True,
+        edition_type: str = "daily"
     ) -> dict:
         """
         Send a news digest to the channel with flood control.
@@ -337,15 +419,17 @@ class TelegramBot:
                 - tag: Single tag (optional)
                 - hero_image: Dict with 'url' or 'r2_url' (optional)
             include_header: Whether to send daily header message
+            edition_type: Edition type string ("daily", "weekend", "weekly")
 
         Returns:
-            Dict with sent/failed counts and timing info
+            Dict with sent/failed counts, timing info, and header_message_id
         """
         results: dict = {
             "sent": 0, 
             "failed": 0,
             "total_time": 0.0,
             "flood_retries": 0,
+            "header_message_id": None,
         }
 
         if not articles:
@@ -359,11 +443,23 @@ class TelegramBot:
 
         start_time = time.time()
 
+        # Unpin previous header before sending new one
+        if include_header:
+            await self._unpin_previous_header()
+
         # Send header (optional)
         if include_header:
-            header = self._format_header(len(articles))
-            if await self.send_message(header, disable_preview=True):
+            header = self._format_header(len(articles), edition_type)
+            header_message_id = await self.send_message(header, disable_preview=False)
+            if header_message_id:
                 results["sent"] += 1
+                results["header_message_id"] = header_message_id
+
+                # Pin the header message (silent - no notification)
+                await self.pin_message(header_message_id, disable_notification=True)
+
+                # Store header message ID for future unpinning
+                self._store_pinned_header_id(header_message_id)
             else:
                 results["failed"] += 1
 
@@ -390,6 +486,45 @@ class TelegramBot:
         self.print_flood_stats()
 
         return results
+
+    async def _unpin_previous_header(self) -> None:
+        """
+        Unpin the previous edition's header message.
+
+        Reads the stored message ID from the database and unpins it.
+        """
+        try:
+            # Try to get the previous pinned header from the editions table
+            from database.connection import get_supabase_client
+            client = get_supabase_client()
+
+            result = client.table("editions")\
+                .select("header_message_id")\
+                .not_.is_("header_message_id", "null")\
+                .order("published_at", desc=True)\
+                .limit(1)\
+                .execute()
+
+            if result.data and result.data[0].get("header_message_id"):
+                previous_id = result.data[0]["header_message_id"]
+                print(f"   [UNPIN] Unpinning previous header (message {previous_id})...")
+                await self.unpin_message(previous_id)
+            else:
+                print(f"   [UNPIN] No previous pinned header found")
+
+        except Exception as e:
+            # Non-fatal: if we can't unpin, continue with publishing
+            print(f"   [UNPIN] Could not unpin previous header: {e}")
+
+    def _store_pinned_header_id(self, message_id: int) -> None:
+        """
+        Store the pinned header message ID for later retrieval.
+
+        This is used by _unpin_previous_header on the next run.
+        The ID is stored via the editions table in record_publications().
+        We just log it here; the actual DB write happens in main.py.
+        """
+        print(f"   [PIN] Header message ID for DB: {message_id}")
 
     async def _send_article(self, article: dict) -> bool:
         """
@@ -431,7 +566,8 @@ class TelegramBot:
             return await self.send_photo(image_url, caption)
         else:
             # Send as text message if no image
-            return await self.send_message(caption)
+            msg_id = await self.send_message(caption)
+            return msg_id is not None
 
     async def send_status(self, status: str) -> bool:
         """
@@ -444,18 +580,40 @@ class TelegramBot:
             True if sent successfully
         """
         # No escaping needed for HTML
-        return await self.send_message(status, disable_preview=True)
+        msg_id = await self.send_message(status, disable_preview=True)
+        return msg_id is not None
 
     # =========================================================================
     # Message Formatting
     # =========================================================================
 
-    def _format_header(self, article_count: int) -> str:
-        """Format digest header message in HTML."""
+    def _format_header(self, article_count: int, edition_type: str = "daily") -> str:
+        """
+        Format digest header message in HTML.
+
+        Format:
+            <b>04 February 2026</b>
+            Our editorial selection for today -- Weekly Edition
+
+            Telegram | adu.media
+
+        Args:
+            article_count: Number of articles in this edition
+            edition_type: Edition type string ("daily", "weekend", "weekly")
+
+        Returns:
+            Formatted HTML header string
+        """
         today = datetime.now().strftime("%d %B %Y")
+        edition_label = EDITION_LABELS.get(edition_type, "Daily Edition")
+
         return (
             f"<b>{today}</b>\n"
-            f"Our editorial selection for today."
+            f"Our editorial selection for today -- {edition_label}\n"
+            f"\n"
+            f'<a href="https://t.me/a_d_u_media">Telegram</a>'
+            f" | "
+            f'<a href="https://adu.media/">adu.media</a>'
         )
 
     def _format_article(self, article: dict) -> str:
@@ -534,16 +692,21 @@ class TelegramBot:
 # Convenience Functions
 # =============================================================================
 
-async def send_to_telegram(articles: list[dict], include_header: bool = True) -> dict:
+async def send_to_telegram(
+    articles: list[dict],
+    include_header: bool = True,
+    edition_type: str = "daily"
+) -> dict:
     """
     Quick function to send articles to Telegram.
 
     Args:
         articles: List of article dicts
         include_header: Whether to include daily header
+        edition_type: Edition type string ("daily", "weekend", "weekly")
 
     Returns:
         Dict with sent/failed counts
     """
     bot = TelegramBot()
-    return await bot.send_digest(articles, include_header)
+    return await bot.send_digest(articles, include_header, edition_type)

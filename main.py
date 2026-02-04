@@ -357,7 +357,8 @@ async def record_publications(
     edition_type: EditionType,
     edition_date: date,
     total_candidates: int,
-    edition_summary: Optional[str] = None
+    edition_summary: Optional[str] = None,
+    header_message_id: Optional[int] = None
 ) -> List[str]:
     """
     Record publications in database.
@@ -430,7 +431,8 @@ async def record_publications(
         total_candidates=total_candidates,
         articles_new=articles_new,
         articles_repeated=articles_repeated,
-        edition_summary=edition_summary
+        edition_summary=edition_summary,
+        header_message_id=header_message_id
     )
 
     print(f"   [OK] Recorded: {articles_new} new, {articles_repeated} updates")
@@ -599,7 +601,7 @@ async def run_publisher(
         # Step 6: Send to Telegram
         print("\n[SEND] Sending to Telegram...")
         bot = TelegramBot()
-        results = await bot.send_digest(articles, include_header=True)
+        results = await bot.send_digest(articles, include_header=True, edition_type=edition_type.value)
 
         print(f"\n[RESULT] Sent: {results['sent']}, Failed: {results['failed']}")
 
@@ -609,7 +611,8 @@ async def run_publisher(
             sent_articles = articles[:results['sent'] - 1]  # -1 for header
             await record_publications(
                 dedup, sent_articles,
-                edition_type, target_date, len(candidates), edition_summary
+                edition_type, target_date, len(candidates), edition_summary,
+                header_message_id=results.get("header_message_id")
             )
 
         # Print final statistics
