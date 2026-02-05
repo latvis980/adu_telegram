@@ -330,70 +330,6 @@ class TelegramBot:
 
         return result is not None
 
-    # =========================================================================
-    # Pin / Unpin
-    # =========================================================================
-
-    async def pin_message(self, message_id: int, disable_notification: bool = True) -> bool:
-        """
-        Pin a message in the channel.
-
-        Requires the bot to be an admin with 'can_edit_messages' right in the channel.
-
-        Args:
-            message_id: ID of the message to pin
-            disable_notification: If True, no notification is sent to subscribers
-
-        Returns:
-            True if pinned successfully
-        """
-        try:
-            await self.bot.pin_chat_message(
-                chat_id=self.channel_id,
-                message_id=message_id,
-                disable_notification=disable_notification
-            )
-            print(f"   [PIN] Pinned message {message_id}")
-            return True
-        except TelegramError as e:
-            print(f"   [PIN] Failed to pin message {message_id}: {e}")
-            return False
-
-    async def unpin_message(self, message_id: int) -> bool:
-        """
-        Unpin a specific message in the channel.
-
-        Args:
-            message_id: ID of the message to unpin
-
-        Returns:
-            True if unpinned successfully
-        """
-        try:
-            await self.bot.unpin_chat_message(
-                chat_id=self.channel_id,
-                message_id=message_id
-            )
-            print(f"   [UNPIN] Unpinned message {message_id}")
-            return True
-        except TelegramError as e:
-            print(f"   [UNPIN] Failed to unpin message {message_id}: {e}")
-            return False
-
-    async def unpin_all_messages(self) -> bool:
-        """
-        Unpin all messages in the channel.
-
-        Returns:
-            True if unpinned successfully
-        """
-        try:
-            await self.bot.unpin_all_chat_messages(chat_id=self.channel_id)
-            print(f"   [UNPIN] Unpinned all messages")
-            return True
-        except TelegramError as e:
-            print(f"   [UNPIN] Failed to unpin all messages: {e}")
-            return False
 
     # =========================================================================
     # Digest Sending
@@ -443,10 +379,6 @@ class TelegramBot:
 
         start_time = time.time()
 
-        # Unpin previous header before sending new one
-        if include_header:
-            await self._unpin_previous_header()
-
         # Send header (optional)
         if include_header:
             header = self._format_header(len(articles), edition_type)
@@ -454,12 +386,6 @@ class TelegramBot:
             if header_message_id:
                 results["sent"] += 1
                 results["header_message_id"] = header_message_id
-
-                # Pin the header message (silent - no notification)
-                await self.pin_message(header_message_id, disable_notification=True)
-
-                # Store header message ID for future unpinning
-                self._store_pinned_header_id(header_message_id)
             else:
                 results["failed"] += 1
 
@@ -486,45 +412,6 @@ class TelegramBot:
         self.print_flood_stats()
 
         return results
-
-    async def _unpin_previous_header(self) -> None:
-        """
-        Unpin the previous edition's header message.
-
-        Reads the stored message ID from the database and unpins it.
-        """
-        try:
-            # Try to get the previous pinned header from the editions table
-            from database.connection import get_supabase_client
-            client = get_supabase_client()
-
-            result = client.table("editions")\
-                .select("header_message_id")\
-                .not_.is_("header_message_id", "null")\
-                .order("published_at", desc=True)\
-                .limit(1)\
-                .execute()
-
-            if result.data and result.data[0].get("header_message_id"):
-                previous_id = result.data[0]["header_message_id"]
-                print(f"   [UNPIN] Unpinning previous header (message {previous_id})...")
-                await self.unpin_message(previous_id)
-            else:
-                print(f"   [UNPIN] No previous pinned header found")
-
-        except Exception as e:
-            # Non-fatal: if we can't unpin, continue with publishing
-            print(f"   [UNPIN] Could not unpin previous header: {e}")
-
-    def _store_pinned_header_id(self, message_id: int) -> None:
-        """
-        Store the pinned header message ID for later retrieval.
-
-        This is used by _unpin_previous_header on the next run.
-        The ID is stored via the editions table in record_publications().
-        We just log it here; the actual DB write happens in main.py.
-        """
-        print(f"   [PIN] Header message ID for DB: {message_id}")
 
     async def _send_article(self, article: dict) -> bool:
         """
