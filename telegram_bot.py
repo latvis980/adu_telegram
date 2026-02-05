@@ -382,7 +382,7 @@ class TelegramBot:
         # Send header (optional)
         if include_header:
             header = self._format_header(len(articles), edition_type)
-            header_message_id = await self.send_message(header, disable_preview=False)
+            header_message_id = await self.send_message(header, disable_preview=True)
             if header_message_id:
                 results["sent"] += 1
                 results["header_message_id"] = header_message_id
