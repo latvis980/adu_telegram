@@ -547,7 +547,7 @@ class TelegramBot:
         # 4. Source link
         if url:
             # HTML link format: <a href="URL">Source Name</a>
-            message_parts.append(f'<a href="{url}">{source_name}</a>')
+            message_parts.append(f'<u><a href="{url}">{source_name}</a></u>')
 
         # Join with single newlines (empty strings create the blank lines)
         return "\n".join(message_parts)
