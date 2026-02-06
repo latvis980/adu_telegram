@@ -478,12 +478,6 @@ class TelegramBot:
         """
         Format digest header message in HTML.
 
-        Format:
-            <b>04 February 2026</b>
-            Our editorial selection for today -- Weekly Edition
-
-            Telegram | adu.media
-
         Args:
             article_count: Number of articles in this edition
             edition_type: Edition type string ("daily", "weekend", "weekly")
@@ -492,11 +486,18 @@ class TelegramBot:
             Formatted HTML header string
         """
         today = datetime.now().strftime("%d %B %Y")
-        edition_label = EDITION_LABELS.get(edition_type, "Daily Edition")
+
+        # Edition-specific phrasing
+        if edition_type == "weekly":
+            selection_line = "Our editorial selection for the week"
+        elif edition_type == "weekend":
+            selection_line = "Our editorial selection for the weekend"
+        else:
+            selection_line = "Our editorial selection for today"
 
         return (
             f"<b>{today}</b>\n"
-            f"Our editorial selection for today -- {edition_label}\n"
+            f"{selection_line}\n"
             f"\n"
             f'<a href="https://t.me/a_d_u_media">Telegram</a>'
             f" | "
