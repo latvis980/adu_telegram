@@ -20,8 +20,8 @@ are PUBLISHED, not during the extraction/filtering phase.
 
 import os
 import json
-import hashlib
-from datetime import date, datetime, timedelta
+import re
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -115,7 +115,7 @@ class DeduplicationChecker:
         # Load prompt template
         self.match_prompt = self._load_match_prompt()
 
-        print(f"[DEDUP] Connected to Supabase with AI matching and rate limiting")
+        print("[DEDUP] Connected to Supabase with AI matching and rate limiting")
         print(f"[DEDUP] Checking against {MAX_PROJECTS_TO_CHECK} recent projects")
 
     def _load_match_prompt(self) -> str:
@@ -267,7 +267,7 @@ Match if: confidence >= 0.75"""
             match = ProjectMatch(**result)
 
             if match.match_found and match.confidence >= MATCH_CONFIDENCE_THRESHOLD:
-                print(f"   ✅ [DEDUP] AI Match: {project_name} -> {match.matched_project_id[:8]}... "
+                print(f"   ✅ [DEDUP] AI Match: {project_name} -> {(match.matched_project_id or '')[:8]}... "
                       f"(conf: {match.confidence:.2f})")
                 return match.matched_project_id, match.confidence, match.match_reason
             else:
@@ -571,7 +571,7 @@ Match if: confidence >= 0.75"""
                     print(f"[DEDUP] Topic has no last_published_date, using first_seen_date: {first_seen}")
                     last_published = first_seen
                 else:
-                    print(f"[DEDUP] Topic has no dates, treating as published today")
+                    print("[DEDUP] Topic has no dates, treating as published today")
                     last_published = date.today().isoformat()
 
             # Parse date
@@ -614,7 +614,7 @@ Match if: confidence >= 0.75"""
                 .update({
                     "last_published_date": publish_date.isoformat(),
                     "times_published": times_published + 1,
-                    "updated_at": datetime.utcnow().isoformat(),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                 })\
                 .eq("id", project_id)\
                 .execute()
@@ -651,6 +651,46 @@ Match if: confidence >= 0.75"""
     def is_url_published(self, url: str) -> bool:
         """Check if URL was actually published (sent to Telegram)."""
         return self.is_url_recorded(url)
+
+    def _slugify(self, text: str) -> str:
+        """
+        Convert headline to URL slug matching adu.media format.
+
+        "Nobel Center / David Chipperfield" -> "nobel-center-david-chipperfield"
+        """
+        if not text:
+            return ""
+        slug = text.lower()
+        # Replace slashes and common separators with spaces
+        slug = slug.replace("/", " ").replace("\\", " ")
+        # Remove all punctuation except hyphens and spaces
+        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+        # Collapse whitespace and convert to hyphens
+        slug = re.sub(r'[\s]+', '-', slug.strip())
+        # Remove duplicate hyphens
+        slug = re.sub(r'-+', '-', slug)
+        # Remove leading/trailing hyphens
+        slug = slug.strip('-')
+        return slug
+
+
+    def _build_adu_media_url(self, headline: str, fetch_date: str) -> str:
+        """
+        Build adu.media article URL from headline and date.
+
+        Args:
+            headline: Formatted headline ("PROJECT / ARCHITECT")
+            fetch_date: ISO date string "YYYY-MM-DD"
+
+        Returns:
+            Full URL like https://www.adu.media/article/2026-02-11/nobel-center-david-chipperfield
+        """
+        slug = self._slugify(headline)
+        if not slug:
+            return ""
+        # Ensure date is just YYYY-MM-DD (no time component)
+        date_part = fetch_date[:10]
+        return f"https://www.adu.media/article/{date_part}/{slug}"
 
     def record_article(
         self,
@@ -693,6 +733,15 @@ Match if: confidence >= 0.75"""
         except Exception:
             pass
 
+        # Build adu.media URL from headline
+        headline = article.get("headline", "")
+        adu_media_url = None
+        if headline:
+             adu_media_url = self._build_adu_media_url(
+                 headline,
+                 article.get("_fetch_date", date.today().isoformat())
+             )
+
         data = {
             "article_url": url,
             "source_id": article.get("source_id", "unknown"),
@@ -706,7 +755,9 @@ Match if: confidence >= 0.75"""
             "fetch_date": article.get("_fetch_date", date.today().isoformat()),
             "status": status,
             "project_id": project_id,
-        }
+            "headline": headline or None,
+            "adu_media_url": adu_media_url,
+         }
 
         # Add extracted info if provided
         if extracted_info:
@@ -742,7 +793,7 @@ Match if: confidence >= 0.75"""
         """Update article status and selection metadata."""
         data = {
             "status": status,
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         if selection_reason:
@@ -797,7 +848,7 @@ Match if: confidence >= 0.75"""
 
             # Set first_published_at if not set
             if not current.get("first_published_at"):
-                update_data["first_published_at"] = datetime.utcnow().isoformat()
+                update_data["first_published_at"] = datetime.now(timezone.utc).isoformat()
 
             self.client.table("all_articles")\
                 .update(update_data)\
@@ -912,7 +963,7 @@ Match if: confidence >= 0.75"""
 
             print(f"      ✅ Batch {batch_num}/{total_batches} complete")
 
-        print(f"\n📊 [DEDUP] Filtering complete:")
+        print("\n📊 [DEDUP] Filtering complete:")
         print(f"   ✅ Eligible: {len(eligible)}")
         print(f"   ❌ Duplicates: {len(duplicates)}")
         print(f"   🔄 Updates: {len(updates)}")
@@ -1074,7 +1125,7 @@ Match if: confidence >= 0.75"""
         data = {
             "edition_type": edition_type,
             "edition_date": edition_date.isoformat(),
-            "published_at": datetime.utcnow().isoformat(),
+            "published_at": datetime.now(timezone.utc).isoformat(),
             "total_candidates": total_candidates,
             "articles_selected": len(article_ids),
             "articles_new": articles_new,
