@@ -269,6 +269,7 @@ async def select_articles(
             article["_selection_category"] = item.category
             article["_weekly_candidate"] = item.weekly_candidate
             article["_is_repeat"] = item.is_repeat
+            article["_linkedin_pick"] = item.linkedin_pick
             selected_articles.append(article)
         else:
             print(f"   [WARN] Selected article not found: {article_id}")
@@ -286,19 +287,21 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
     for article in articles:
         telegram_article = {
             "id": article.get("id", ""),
-            "title": article.get("title", ""),  # Keep for logging
-            "headline": article.get("headline", ""),  # CRITICAL: This is what Telegram uses
-            "tag": article.get("tag", ""),  # CRITICAL: Single tag for Telegram
+            "title": article.get("title", ""),
+            "headline": article.get("headline", ""),
+            "tag": article.get("tag", ""),
             "link": article.get("link", ""),
             "ai_summary": article.get("ai_summary", ""),
-            "tags": article.get("tags", []),  # Keep for metadata
+            "tags": article.get("tags", []),
             "source_id": article.get("source_id", ""),
             "source_name": article.get("source_name", article.get("source_id", "Unknown")),
             "published": article.get("published"),
             "_fetch_date": article.get("_fetch_date"),
-            "_extracted_info": article.get("_extracted_info"),  # For recording
+            "_extracted_info": article.get("_extracted_info"),
             "_selection_reason": article.get("_selection_reason"),
             "_selection_category": article.get("_selection_category"),
+            "_r2_path": article.get("_r2_path"),           # Preserve for DB recording
+            "image": article.get("image"),                  # Preserve original image dict for DB recording
         }
 
         image_info = article.get("image", {})
@@ -615,6 +618,27 @@ async def run_publisher(
                 header_message_id=results.get("header_message_id")
             )
 
+        # Step 8: LinkedIn post to admin via Telegram
+        if not dry_run:
+            try:
+                from linkedin_telegram import run as run_linkedin
+                print("\n[LINKEDIN] Preparing LinkedIn post for admin...")
+                await run_linkedin(target_date=target_date)
+            except Exception as e:
+                print(f"\n[LINKEDIN] Error (non-fatal): {e}")
+
+        # Step 8: LinkedIn post to admin via Telegram
+        if not dry_run:
+            try:
+                from linkedin_telegram import run as run_linkedin
+                print("\n[LINKEDIN] Preparing LinkedIn post for admin...")
+                await run_linkedin(
+                    target_date=target_date,
+                    articles_from_pipeline=articles,
+                )
+            except Exception as e:
+                print(f"\n[LINKEDIN] Error (non-fatal): {e}")
+                
         # Print final statistics
         from utils.rate_limiter import get_rate_limiter
         limiter = get_rate_limiter()

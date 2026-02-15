@@ -69,7 +69,8 @@ Return ONLY a valid JSON object with exactly this structure:
             "reason": "Brief 10-15 word rationale for selection",
             "category": "project|news|interview|competition|award|opinion",
             "publication_day": "saturday|sunday|monday",
-            "weekly_candidate": false
+            "weekly_candidate": false,
+            "linkedin_pick": false
         }},
         ... (exactly 7 articles total)
     ],
@@ -95,3 +96,4 @@ Return ONLY a valid JSON object with exactly this structure:
 - "weekly_candidate" should typically be false for weekend edition (Weekly just published)
 - Categories must be exactly one of: project, news, interview, competition, award, opinion
 - Double-check that none of your selections appear in the Weekly Edition list
+- Flag exactly ONE article as "linkedin_pick": true -- the best candidate for a LinkedIn post. Pick a visually striking project with a named architect and strong image. Prefer "project" category.

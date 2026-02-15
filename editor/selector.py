@@ -55,6 +55,7 @@ class SelectedArticle(BaseModel):
     weekly_candidate: Optional[bool] = Field(default=False, description="Flag for weekly consideration")
     weekly_reason: Optional[str] = Field(default=None, description="Why this deserves weekly")
     is_repeat: Optional[bool] = Field(default=False, description="Was in daily edition (weekly only)")
+    linkedin_pick: Optional[bool] = Field(default=False, description="Best article for LinkedIn post")
     repeat_from_date: Optional[str] = Field(default=None, description="Date of daily publication")
     significance_score: Optional[int] = Field(default=None, description="1-10 significance rating")
     publication_day: Optional[str] = Field(default=None, description="Day of publication (weekend)")

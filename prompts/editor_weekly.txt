@@ -71,7 +71,8 @@ Return ONLY a valid JSON object with exactly this structure:
             "title": "Article title for reference",
             "reason": "Brief 10-15 word rationale for selection",
             "category": "project|news|interview|competition|award|opinion|criticism",
-            "significance_score": 9
+            "significance_score": 9,
+            "linkedin_pick": false
         }},
         ... (exactly 7 articles total)
     ],
@@ -102,3 +103,4 @@ Aim for articles scoring 7+ to maintain the flagship quality standard.
 - Categories: project, news, interview, competition, award, opinion, criticism
 - This edition shapes how the architecture community remembers the week
 - Focus on the 7 BEST articles, regardless of when they were published this week
+- Flag exactly ONE article as "linkedin_pick": true -- the best candidate for a LinkedIn post. Pick a visually striking project with a named architect and strong image. Prefer "project" category.
