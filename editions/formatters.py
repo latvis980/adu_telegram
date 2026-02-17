@@ -4,6 +4,11 @@ Edition Formatters for ADUmedia
 
 Provides edition-specific headers and formatting for Telegram messages.
 No emoji - clean, professional formatting only.
+
+Schedule:
+    Monday    - Weekend Catch-Up Edition (Fri, Sat, Sun, Mon)
+    Tue-Fri   - Daily Edition (2 days)
+    Sat/Sun   - No publication
 """
 
 from abc import ABC, abstractmethod
@@ -22,25 +27,7 @@ class EditionFormatter(ABC):
     
     @abstractmethod
     def format_header(self, target_date: date, article_count: int = 7) -> str:
-        date_str = target_date.strftime("%d %B %Y")
-
-        # Calculate week range
-        week_end = target_date - timedelta(days=1)  # Sunday
-        week_start = week_end - timedelta(days=6)   # Previous Monday
-
-        # Get ISO week number
-        week_num = target_date.isocalendar()[1] - 1  # Previous week
-
-        # Format week range
-        if week_start.month == week_end.month:
-            week_range = f"{week_start.day}-{week_end.day} {week_end.strftime('%B')}"
-        else:
-            week_range = f"{week_start.strftime('%d %b')} - {week_end.strftime('%d %b')}"
-
-        return (
-            f"{date_str}\n"
-            f"The Week in Architecture: Best of Week {week_num} ({week_range})."
-        )
+        pass
     
     @abstractmethod
     def get_edition_name(self) -> str:
@@ -53,7 +40,7 @@ class EditionFormatter(ABC):
 # =============================================================================
 
 class DailyFormatter(EditionFormatter):
-    """Formatter for daily editions (Wed/Thu/Fri)."""
+    """Formatter for daily editions (Tue/Wed/Thu/Fri)."""
     
     def format_header(self, target_date: date, article_count: int = 7) -> str:
         date_str = target_date.strftime("%d %B %Y")
@@ -71,20 +58,19 @@ class DailyFormatter(EditionFormatter):
 # =============================================================================
 
 class WeekendFormatter(EditionFormatter):
-    """Formatter for weekend catch-up edition (Tuesday)."""
+    """Formatter for weekend catch-up edition (Monday)."""
     
     def format_header(self, target_date: date, article_count: int = 7) -> str:
         date_str = target_date.strftime("%d %B %Y")
         
-        # Calculate coverage period
-        monday = target_date - timedelta(days=1)
-        saturday = target_date - timedelta(days=3)
+        # Calculate coverage period (Fri through Mon)
+        friday = target_date - timedelta(days=3)
         
-        # Format as "17-20 January" or "29 Jan - 1 Feb" if crossing months
-        if saturday.month == monday.month:
-            coverage = f"{saturday.day}-{monday.day} {monday.strftime('%B')}"
+        # Format as "14-17 February" or "29 Jan - 1 Feb" if crossing months
+        if friday.month == target_date.month:
+            coverage = f"{friday.day}-{target_date.day} {target_date.strftime('%B')}"
         else:
-            coverage = f"{saturday.strftime('%d %b')} - {monday.strftime('%d %b')}"
+            coverage = f"{friday.strftime('%d %b')} - {target_date.strftime('%d %b')}"
         
         return (
             f"{date_str}\n"
@@ -94,40 +80,6 @@ class WeekendFormatter(EditionFormatter):
     
     def get_edition_name(self) -> str:
         return "Weekend Catch-Up Edition"
-
-
-# =============================================================================
-# Weekly Edition Formatter
-# =============================================================================
-
-class WeeklyFormatter(EditionFormatter):
-    """Formatter for weekly flagship edition (Monday)."""
-
-    def format_header(self, target_date: date, article_count: int = 7) -> str:
-        date_str = target_date.strftime("%d %B %Y")
-
-        # TEMPORARY: Calculate week range for Sunday publication
-        # Sunday is the end of the week, so week_end is same day (Saturday before)
-        week_end = target_date - timedelta(days=1)  # Saturday (TEMPORARY - normally target_date - 1 for Sunday)
-        week_start = week_end - timedelta(days=6)   # Previous Sunday
-
-        # Get ISO week number
-        week_num = target_date.isocalendar()[1]  # Current week (TEMPORARY - normally -1 for previous week)
-        
-        # Format week range
-        if week_start.month == week_end.month:
-            week_range = f"{week_start.day}-{week_end.day} {week_end.strftime('%B')}"
-        else:
-            week_range = f"{week_start.strftime('%d %b')} - {week_end.strftime('%d %b')}"
-        
-        return (
-            f"{date_str}\n"
-            f"Our editorial selection for today -- Weekly Edition\n"
-            f"Best of Week {week_num} ({week_range})."
-        )
-    
-    def get_edition_name(self) -> str:
-        return "Weekly Edition"
 
 
 # =============================================================================
@@ -147,7 +99,6 @@ def get_formatter(edition_type: EditionType) -> EditionFormatter:
     formatters = {
         EditionType.DAILY: DailyFormatter,
         EditionType.WEEKEND: WeekendFormatter,
-        EditionType.WEEKLY: WeeklyFormatter,
     }
     
     formatter_class = formatters.get(edition_type)

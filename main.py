@@ -20,11 +20,11 @@ The AI matching handles:
 - Location variations ("NYC" vs "New York")
 
 Schedule:
-    Monday    - Weekly Edition (covers full week, Mon-Sun)
-    Tuesday   - Weekend Catch-Up Edition (covers Sat, Sun, Mon - no daily editions)
-    Wednesday - Daily Edition
-    Thursday  - Daily Edition
-    Friday    - Daily Edition
+    Monday    - Weekend Catch-Up Edition (covers Fri, Sat, Sun, Mon - 4 days)
+    Tuesday   - Daily Edition (covers 2 days)
+    Wednesday - Daily Edition (covers 2 days)
+    Thursday  - Daily Edition (covers 2 days)
+    Friday    - Daily Edition (covers 2 days)
     Saturday  - No publication
     Sunday    - No publication
 
@@ -86,7 +86,7 @@ def parse_args():
         help="Test connections only"
     )
     parser.add_argument(
-        "--edition", type=str, choices=["daily", "weekend", "weekly"], default=None,
+        "--edition", type=str, choices=["daily", "weekend"], default=None,
         help="Force specific edition type"
     )
     parser.add_argument(
@@ -118,24 +118,15 @@ def get_dates_for_edition(edition_type: EditionType, target_date: date) -> List[
     Get the dates to fetch candidates for based on edition type.
 
     Schedule:
-    - Daily (Wed/Thu/Fri): Same day only
-    - Weekend (Tuesday): Sat, Sun, Mon (3 days with no daily editions)
-    - Weekly: Previous 7 days (Mon-Sun)
-      * NORMAL: Runs on Monday (see selector.py determine_edition_type)
-
-    Note: This function works the same for both Sunday and Monday.
-    The day selection is controlled in selector.py's determine_edition_type().
+    - Daily (Tue/Wed/Thu/Fri): Today + yesterday (2 days)
+    - Weekend (Monday): Friday, Saturday, Sunday, Monday (4 days)
     """
     if edition_type == EditionType.DAILY:
-        # Same day
-        return [target_date]
+        # Today + yesterday (2 days)
+        return [target_date - timedelta(days=1), target_date]
     elif edition_type == EditionType.WEEKEND:
-        # Tuesday covers: Saturday (-3), Sunday (-2), Monday (-1)
-        return [target_date - timedelta(days=i) for i in range(3, 0, -1)]
-    elif edition_type == EditionType.WEEKLY:
-        # Weekly covers: Previous 7 days (Mon-Sun)
-        # Works for both Sunday testing and Monday normal operation
-        return [target_date - timedelta(days=i) for i in range(7, 0, -1)]
+        # Monday covers: Friday (-3), Saturday (-2), Sunday (-1), Monday (0)
+        return [target_date - timedelta(days=i) for i in range(3, -1, -1)]
     return [target_date]
 
 
@@ -229,22 +220,6 @@ async def select_articles(
 
     selector = ArticleSelector()
 
-    # Get recent weekly URLs for exclusion (weekly edition only)
-    recent_weekly_urls = []
-    if edition_type == EditionType.WEEKLY:
-        # Get URLs from weekly editions in the last 30 days
-        try:
-            result = dedup.client.table("all_articles")\
-                .select("article_url")\
-                .contains("selected_for_editions", ["weekly"])\
-                .gte("fetch_date", (target_date - timedelta(days=30)).isoformat())\
-                .execute()
-
-            recent_weekly_urls = [row["article_url"] for row in result.data if row.get("article_url")]
-            print(f"   Recent weekly URLs (exclude): {len(recent_weekly_urls)}")
-        except Exception as e:
-            print(f"   [WARN] Could not fetch recent weekly URLs: {e}")
-
     # Run AI selection
     # Note: We pass empty published_urls since we're using project-based dedup now
     published_urls = []
@@ -253,7 +228,6 @@ async def select_articles(
         edition_type=edition_type,
         candidates=candidates,
         published_urls=published_urls,
-        recent_weekly_urls=recent_weekly_urls,
         target_date=target_date
     )
 
@@ -267,9 +241,6 @@ async def select_articles(
             article = candidate_map[article_id].copy()
             article["_selection_reason"] = item.reason
             article["_selection_category"] = item.category
-            article["_weekly_candidate"] = item.weekly_candidate
-            article["_is_repeat"] = item.is_repeat
-            article["_linkedin_pick"] = item.linkedin_pick
             selected_articles.append(article)
         else:
             print(f"   [WARN] Selected article not found: {article_id}")
@@ -618,27 +589,6 @@ async def run_publisher(
                 header_message_id=results.get("header_message_id")
             )
 
-        # Step 8: LinkedIn post to admin via Telegram
-        if not dry_run:
-            try:
-                from linkedin_telegram import run as run_linkedin
-                print("\n[LINKEDIN] Preparing LinkedIn post for admin...")
-                await run_linkedin(target_date=target_date)
-            except Exception as e:
-                print(f"\n[LINKEDIN] Error (non-fatal): {e}")
-
-        # Step 8: LinkedIn post to admin via Telegram
-        if not dry_run:
-            try:
-                from linkedin_telegram import run as run_linkedin
-                print("\n[LINKEDIN] Preparing LinkedIn post for admin...")
-                await run_linkedin(
-                    target_date=target_date,
-                    articles_from_pipeline=articles,
-                )
-            except Exception as e:
-                print(f"\n[LINKEDIN] Error (non-fatal): {e}")
-                
         # Print final statistics
         from utils.rate_limiter import get_rate_limiter
         limiter = get_rate_limiter()
@@ -686,7 +636,7 @@ async def main():
 
     edition_type = None
     if args.edition:
-        edition_type = {"daily": EditionType.DAILY, "weekend": EditionType.WEEKEND, "weekly": EditionType.WEEKLY}.get(args.edition)
+        edition_type = {"daily": EditionType.DAILY, "weekend": EditionType.WEEKEND}.get(args.edition)
 
     await run_publisher(
         edition_type=edition_type,

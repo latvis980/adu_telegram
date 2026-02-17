@@ -5,6 +5,15 @@ AI Article Selector for ADUmedia
 Uses LangChain with GPT-4o to select articles for different edition types.
 Includes LangSmith tracing for monitoring and debugging.
 
+Schedule:
+    Monday    - Weekend Catch-Up Edition (covers Fri, Sat, Sun, Mon - 4 days)
+    Tuesday   - Daily Edition (covers 2 days)
+    Wednesday - Daily Edition (covers 2 days)
+    Thursday  - Daily Edition (covers 2 days)
+    Friday    - Daily Edition (covers 2 days)
+    Saturday  - No publication
+    Sunday    - No publication
+
 Environment Variables:
     OPENAI_API_KEY          - OpenAI API key
     LANGCHAIN_TRACING_V2    - Set to "true" to enable LangSmith
@@ -37,9 +46,8 @@ from utils.rate_limiter import get_rate_limiter, retry_on_rate_limit
 
 class EditionType(Enum):
     """Types of editorial editions."""
-    DAILY = "daily"           # Wednesday, Thursday, Friday
-    WEEKEND = "weekend"       # Tuesday (covers Sat, Sun, Mon)
-    WEEKLY = "weekly"         # Monday (covers full week)
+    DAILY = "daily"           # Tuesday, Wednesday, Thursday, Friday
+    WEEKEND = "weekend"       # Monday (covers Fri, Sat, Sun, Mon)
 
 
 # =============================================================================
@@ -52,12 +60,6 @@ class SelectedArticle(BaseModel):
     title: str = Field(description="Article title for reference")
     reason: str = Field(description="Brief 10-15 word selection rationale")
     category: str = Field(description="Article category")
-    weekly_candidate: Optional[bool] = Field(default=False, description="Flag for weekly consideration")
-    weekly_reason: Optional[str] = Field(default=None, description="Why this deserves weekly")
-    is_repeat: Optional[bool] = Field(default=False, description="Was in daily edition (weekly only)")
-    linkedin_pick: Optional[bool] = Field(default=False, description="Best article for LinkedIn post")
-    repeat_from_date: Optional[str] = Field(default=None, description="Date of daily publication")
-    significance_score: Optional[int] = Field(default=None, description="1-10 significance rating")
     publication_day: Optional[str] = Field(default=None, description="Day of publication (weekend)")
 
 
@@ -65,16 +67,8 @@ class SelectionStats(BaseModel):
     """Statistics about the selection process."""
     total_candidates: int
     excluded_duplicates: Optional[int] = 0
-    excluded_from_weekly: Optional[int] = None
     geographic_spread: List[str]
     source_spread: List[str]
-
-
-class WeeklyStats(BaseModel):
-    """Weekly edition specific statistics."""
-    repeated_count: int
-    new_count: int
-    repeat_justification: Optional[str] = None
 
 
 class EditorSelection(BaseModel):
@@ -82,7 +76,6 @@ class EditorSelection(BaseModel):
     selected: List[SelectedArticle] = Field(description="Exactly 7 selected articles")
     edition_summary: str = Field(description="One sentence edition summary")
     selection_stats: SelectionStats
-    weekly_stats: Optional[WeeklyStats] = None
     coverage_breakdown: Optional[Dict[str, int]] = None
 
 
@@ -107,7 +100,6 @@ def load_prompt(edition_type: EditionType) -> str:
     prompt_files = {
         EditionType.DAILY: "editor_daily.txt",
         EditionType.WEEKEND: "editor_weekend.txt",
-        EditionType.WEEKLY: "editor_weekly.txt",
     }
 
     prompt_file = prompts_dir / prompt_files[edition_type]
@@ -168,12 +160,10 @@ class ArticleSelector:
     def _format_candidates_for_prompt(
         self,
         candidates: List[Dict[str, Any]],
-        max_chars: int = 40000  # Reduced from 50000 to save tokens
+        max_chars: int = 40000
     ) -> str:
         """
         Format candidate articles for inclusion in prompt.
-
-        OPTIMIZED: Aggressively truncates to reduce token usage for weekly editions.
 
         Args:
             candidates: List of candidate article dicts
@@ -187,13 +177,13 @@ class ArticleSelector:
         for article in candidates:
             simplified.append({
                 "id": article.get("id", ""),
-                "title": article.get("title", "")[:120],  # Reduced from 150
+                "title": article.get("title", "")[:120],
                 "source_id": article.get("source_id", ""),
                 "source_name": article.get("source_name", ""),
                 "link": article.get("link", ""),
                 "published": article.get("published", ""),
-                "ai_summary": article.get("ai_summary", "")[:200],  # Reduced from 300
-                "tags": article.get("tags", [])[:3],  # Reduced from 5
+                "ai_summary": article.get("ai_summary", "")[:200],
+                "tags": article.get("tags", [])[:3],
                 "has_image": article.get("image", {}).get("has_image", False),
             })
 
@@ -202,7 +192,7 @@ class ArticleSelector:
 
         # Truncate if too long
         if len(candidates_json) > max_chars:
-            print(f"   ⚠️  [WARN] Truncating candidates from {len(candidates_json)} to {max_chars} chars")
+            print(f"   [WARN] Truncating candidates from {len(candidates_json)} to {max_chars} chars")
             candidates_json = candidates_json[:max_chars] + "\n... (truncated)"
 
         return candidates_json
@@ -222,9 +212,14 @@ class ArticleSelector:
         """Build the complete daily edition prompt."""
         template = load_prompt(EditionType.DAILY)
 
+        # Calculate coverage dates (today + yesterday)
+        yesterday = target_date - timedelta(days=1)
+        coverage = f"{yesterday.strftime('%B %d')} - {target_date.strftime('%B %d, %Y')}"
+
         return template.format(
             current_date=target_date.strftime("%A, %B %d, %Y"),
             day_name=target_date.strftime("%A"),
+            coverage_dates=coverage,
             candidates_json=self._format_candidates_for_prompt(candidates),
             published_urls=self._format_urls_list(published_urls),
         )
@@ -233,45 +228,20 @@ class ArticleSelector:
         self,
         candidates: List[Dict[str, Any]],
         published_urls: List[str],
-        weekly_article_urls: List[str],
         target_date: date
     ) -> str:
-        """Build the complete weekend edition prompt."""
+        """Build the complete weekend catch-up edition prompt."""
         template = load_prompt(EditionType.WEEKEND)
 
-        # Calculate coverage dates (Sat, Sun, Mon before Tuesday)
-        monday = target_date - timedelta(days=1)
-        sunday = target_date - timedelta(days=2)
-        saturday = target_date - timedelta(days=3)
-        coverage = f"{saturday.strftime('%B %d')} - {monday.strftime('%B %d, %Y')}"
+        # Calculate coverage dates (Fri, Sat, Sun, Mon = today)
+        friday = target_date - timedelta(days=3)
+        coverage = f"{friday.strftime('%B %d')} - {target_date.strftime('%B %d, %Y')}"
 
         return template.format(
             current_date=target_date.strftime("%A, %B %d, %Y"),
             coverage_dates=coverage,
             candidates_json=self._format_candidates_for_prompt(candidates),
-            weekly_article_urls=self._format_urls_list(weekly_article_urls),
             published_urls=self._format_urls_list(published_urls),
-        )
-
-    def _build_weekly_prompt(
-        self,
-        candidates: List[Dict[str, Any]],
-        recent_weekly_urls: List[str],
-        target_date: date
-    ) -> str:
-        """Build the complete weekly edition prompt."""
-        template = load_prompt(EditionType.WEEKLY)
-
-        # Calculate week range
-        week_end = target_date - timedelta(days=1)  # Sunday
-        week_start = week_end - timedelta(days=6)   # Previous Monday
-
-        return template.format(
-            current_date=target_date.strftime("%A, %B %d, %Y"),
-            week_start=week_start.strftime("%B %d"),
-            week_end=week_end.strftime("%B %d, %Y"),
-            candidates_json=self._format_candidates_for_prompt(candidates),
-            recent_weekly_urls=self._format_urls_list(recent_weekly_urls),
         )
 
     async def select_daily(
@@ -282,10 +252,10 @@ class ArticleSelector:
         run_name: Optional[str] = None
     ) -> EditorSelection:
         """
-        Select articles for daily edition (Wed/Thu/Fri).
+        Select articles for daily edition (Tue/Wed/Thu/Fri).
 
         Args:
-            candidates: Available candidate articles for today
+            candidates: Available candidate articles (2 days)
             published_urls: URLs of previously published articles
             target_date: Target date (defaults to today)
             run_name: Optional name for LangSmith trace
@@ -296,14 +266,14 @@ class ArticleSelector:
         if target_date is None:
             target_date = date.today()
 
-        print(f"\n📰 [EDITOR] Selecting DAILY edition for {target_date}")
-        print(f"   Candidates: {len(candidates)}")
+        print(f"\n[EDITOR] Selecting DAILY edition for {target_date}")
+        print(f"   Candidates (2 days): {len(candidates)}")
         print(f"   Previously published: {len(published_urls)}")
 
         prompt = self._build_daily_prompt(candidates, published_urls, target_date)
 
         # Estimate tokens
-        estimated_tokens = len(prompt) // 4 + 2000  # ~2000 for response
+        estimated_tokens = len(prompt) // 4 + 2000
 
         # Configure run metadata for LangSmith
         config = RunnableConfig(
@@ -339,13 +309,13 @@ class ArticleSelector:
             result = json.loads(response.content)
             selection = EditorSelection(**result)
 
-            print(f"   ✅ [OK] Selected {len(selection.selected)} articles")
+            print(f"   [OK] Selected {len(selection.selected)} articles")
             print(f"   Summary: {selection.edition_summary}")
 
             return selection
 
         except Exception as e:
-            print(f"   ❌ [ERROR] Failed to parse selection: {e}")
+            print(f"   [ERROR] Failed to parse selection: {e}")
             print(f"   Raw response: {response.content[:500] if 'response' in locals() else 'N/A'}...")
             raise
 
@@ -353,18 +323,16 @@ class ArticleSelector:
         self,
         candidates: List[Dict[str, Any]],
         published_urls: List[str],
-        weekly_article_urls: List[str],
         target_date: Optional[date] = None,
         run_name: Optional[str] = None
     ) -> EditorSelection:
         """
-        Select articles for weekend catch-up edition (Tuesday).
+        Select articles for weekend catch-up edition (Monday).
 
         Args:
-            candidates: Candidates from Saturday, Sunday, Monday
+            candidates: Candidates from Friday, Saturday, Sunday, Monday (4 days)
             published_urls: All previously published URLs
-            weekly_article_urls: URLs from Monday's Weekly Edition (must exclude)
-            target_date: Target date (defaults to today, should be Tuesday)
+            target_date: Target date (defaults to today, should be Monday)
             run_name: Optional name for LangSmith trace
 
         Returns:
@@ -373,13 +341,12 @@ class ArticleSelector:
         if target_date is None:
             target_date = date.today()
 
-        print(f"\n📰 [EDITOR] Selecting WEEKEND edition for {target_date}")
-        print(f"   Candidates (3 days): {len(candidates)}")
-        print(f"   Weekly to exclude: {len(weekly_article_urls)}")
+        print(f"\n[EDITOR] Selecting WEEKEND edition for {target_date}")
+        print(f"   Candidates (4 days): {len(candidates)}")
         print(f"   Previously published: {len(published_urls)}")
 
         prompt = self._build_weekend_prompt(
-            candidates, published_urls, weekly_article_urls, target_date
+            candidates, published_urls, target_date
         )
 
         # Estimate tokens
@@ -392,7 +359,6 @@ class ArticleSelector:
                 "edition_type": "weekend",
                 "target_date": target_date.isoformat(),
                 "candidate_count": len(candidates),
-                "weekly_exclusions": len(weekly_article_urls),
             }
         )
 
@@ -417,98 +383,13 @@ class ArticleSelector:
             result = json.loads(response.content)
             selection = EditorSelection(**result)
 
-            print(f"   ✅ [OK] Selected {len(selection.selected)} articles")
+            print(f"   [OK] Selected {len(selection.selected)} articles")
             print(f"   Summary: {selection.edition_summary}")
 
             return selection
 
         except Exception as e:
-            print(f"   ❌ [ERROR] Failed to parse selection: {e}")
-            raise
-
-    async def select_weekly(
-        self,
-        candidates: List[Dict[str, Any]],
-        recent_weekly_urls: Optional[List[str]] = None,
-        target_date: Optional[date] = None,
-        run_name: Optional[str] = None
-    ) -> EditorSelection:
-        """
-        Select articles for weekly flagship edition (Monday).
-
-        SIMPLIFIED: Just picks the 7 best articles from the week, period.
-        Excludes articles from recent weekly editions to avoid repetition.
-
-        Args:
-            candidates: All candidates from the past 7 days
-            recent_weekly_urls: URLs from recent weekly editions (last 30 days) to exclude
-            target_date: Target date (defaults to today, should be Monday)
-            run_name: Optional name for LangSmith trace
-
-        Returns:
-            EditorSelection with 7 selected articles
-        """
-        if target_date is None:
-            target_date = date.today()
-
-        if recent_weekly_urls is None:
-            recent_weekly_urls = []
-
-        print(f"\n🏆 [EDITOR] Selecting WEEKLY edition for {target_date}")
-        print(f"   Candidates (7 days): {len(candidates)}")
-        if recent_weekly_urls:
-            print(f"   Recent weekly (exclude): {len(recent_weekly_urls)}")
-
-        prompt = self._build_weekly_prompt(candidates, recent_weekly_urls, target_date)
-
-        # Estimate tokens - weekly prompts are LARGE
-        estimated_tokens = len(prompt) // 4 + 2500  # Larger response for weekly
-
-        print(f"   📊 Estimated tokens: {estimated_tokens:,}")
-
-        config = RunnableConfig(
-            run_name=run_name or f"weekly-{target_date.isoformat()}",
-            tags=["weekly", "editor", "flagship", target_date.strftime("%Y-%m-%d")],
-            metadata={
-                "edition_type": "weekly",
-                "target_date": target_date.isoformat(),
-                "candidate_count": len(candidates),
-            }
-        )
-
-        try:
-            # Use rate limiter with large token estimate
-            async with self.rate_limiter.acquire(estimated_tokens):
-                messages = [("human", prompt)]
-
-                async def _call_llm():
-                    return await self.llm.ainvoke(messages, config=config)
-
-                print(f"   ⏳ Calling AI editor (this may take a moment for {len(candidates)} candidates)...")
-                response = await retry_on_rate_limit(_call_llm, max_retries=7)  # More retries for weekly
-
-                # Record actual token usage
-                if hasattr(response, 'response_metadata'):
-                    usage = response.response_metadata.get('token_usage', {})
-                    total_tokens = usage.get('total_tokens', estimated_tokens)
-                    self.rate_limiter.record_usage(total_tokens)
-                    print(f"   📊 Actual tokens used: {total_tokens:,}")
-                else:
-                    self.rate_limiter.record_usage(estimated_tokens)
-
-            result = json.loads(response.content)
-            selection = EditorSelection(**result)
-
-            print(f"   ✅ [OK] Selected {len(selection.selected)} articles")
-            print(f"   Summary: {selection.edition_summary}")
-
-            # Print rate limiter stats after weekly (important to see)
-            self.rate_limiter.print_stats()
-
-            return selection
-
-        except Exception as e:
-            print(f"   ❌ [ERROR] Failed to parse selection: {e}")
+            print(f"   [ERROR] Failed to parse selection: {e}")
             raise
 
     async def select(
@@ -516,9 +397,6 @@ class ArticleSelector:
         edition_type: EditionType,
         candidates: List[Dict[str, Any]],
         published_urls: List[str],
-        weekly_article_urls: Optional[List[str]] = None,
-        daily_published_this_week: Optional[List[Dict[str, str]]] = None,
-        recent_weekly_urls: Optional[List[str]] = None,
         target_date: Optional[date] = None
     ) -> EditorSelection:
         """
@@ -528,9 +406,6 @@ class ArticleSelector:
             edition_type: Type of edition to create
             candidates: Available candidate articles
             published_urls: Previously published URLs (for deduplication)
-            weekly_article_urls: URLs from Weekly Edition (for weekend exclusion)
-            daily_published_this_week: Daily edition articles (for weekly)
-            recent_weekly_urls: Recent weekly URLs (for weekly exclusion)
             target_date: Target publication date
 
         Returns:
@@ -547,14 +422,6 @@ class ArticleSelector:
             return await self.select_weekend(
                 candidates=candidates,
                 published_urls=published_urls,
-                weekly_article_urls=weekly_article_urls or [],
-                target_date=target_date
-            )
-
-        elif edition_type == EditionType.WEEKLY:
-            return await self.select_weekly(
-                candidates=candidates,
-                recent_weekly_urls=recent_weekly_urls or [],
                 target_date=target_date
             )
 
@@ -570,6 +437,15 @@ def determine_edition_type(target_date: Optional[date] = None) -> Optional[Editi
     """
     Determine what edition type to publish based on day of week.
 
+    Schedule:
+        Monday (0)    - Weekend Catch-Up Edition (covers Fri, Sat, Sun, Mon)
+        Tuesday (1)   - Daily Edition (covers 2 days)
+        Wednesday (2) - Daily Edition (covers 2 days)
+        Thursday (3)  - Daily Edition (covers 2 days)
+        Friday (4)    - Daily Edition (covers 2 days)
+        Saturday (5)  - No publication
+        Sunday (6)    - No publication
+
     Args:
         target_date: Date to check (defaults to today)
 
@@ -581,26 +457,11 @@ def determine_edition_type(target_date: Optional[date] = None) -> Optional[Editi
 
     weekday = target_date.weekday()  # Monday = 0, Sunday = 6
 
-    # ==========================================================================
-    # TEMPORARY: Testing weekly edition on Sunday instead of Monday
-    # TO RESTORE: Comment out the Sunday block, uncomment the Monday block
-    # ==========================================================================
-
-    # TEMPORARY - Sunday weekly edition (for testing)
-    # if weekday == 6:      # Sunday
-    #     return EditionType.WEEKLY
-
-    # NORMAL - Monday weekly edition (restore this when testing is done)
-    if weekday == 0:      # Monday
-        return EditionType.WEEKLY
-
-    # ==========================================================================
-
-    if weekday == 1:    # Tuesday
+    if weekday == 0:                  # Monday
         return EditionType.WEEKEND
-    elif weekday in [2, 3, 4]:  # Wed, Thu, Fri
+    elif weekday in [1, 2, 3, 4]:     # Tue, Wed, Thu, Fri
         return EditionType.DAILY
-    else:                 # Saturday, Sunday, Monday (during Sunday testing)
+    else:                              # Saturday, Sunday
         return None
 
 
@@ -609,6 +470,5 @@ def get_edition_display_name(edition_type: EditionType) -> str:
     names = {
         EditionType.DAILY: "Daily Edition",
         EditionType.WEEKEND: "Weekend Catch-Up Edition",
-        EditionType.WEEKLY: "Weekly Edition - The Week in Architecture",
     }
     return names.get(edition_type, "Edition")

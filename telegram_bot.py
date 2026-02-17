@@ -55,9 +55,7 @@ MAX_RETRY_DELAY: float = 120.0
 EDITION_LABELS = {
     "daily": "Daily Edition",
     "weekend": "Weekend Catch-Up",
-    "weekly": "Weekly Edition",
 }
-
 
 class TelegramBot:
     """
