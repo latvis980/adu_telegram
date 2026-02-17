@@ -38,6 +38,7 @@ import asyncio
 import argparse
 import os
 import re
+import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -84,6 +85,54 @@ def parse_args():
 
 
 # =============================================================================
+# Pipeline Article Normalizer
+# =============================================================================
+
+def normalize_article(article: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Normalize pipeline article fields to match Supabase field names.
+
+    Pipeline articles use different field names (e.g. _selection_category,
+    _extracted_info dict, hero_image dict, link). This function creates
+    a unified view so downstream functions work with both sources.
+
+    Does NOT modify the original article -- returns a new dict.
+    """
+    # If article already has Supabase-style fields, return as-is
+    if article.get("selection_category") and article.get("extracted_location"):
+        return article
+
+    normalized = dict(article)  # shallow copy
+
+    # Category: pipeline uses _selection_category
+    if not normalized.get("selection_category"):
+        normalized["selection_category"] = article.get("_selection_category", "")
+
+    # Extracted info: pipeline stores in _extracted_info dict
+    extracted = article.get("_extracted_info", {})
+    if not normalized.get("extracted_project_name"):
+        normalized["extracted_project_name"] = extracted.get("project_name", "")
+    if not normalized.get("extracted_architect"):
+        normalized["extracted_architect"] = extracted.get("architect", "")
+    if not normalized.get("extracted_location"):
+        normalized["extracted_location"] = extracted.get("location", "")
+
+    # Article URL: pipeline uses "link"
+    if not normalized.get("article_url"):
+        normalized["article_url"] = article.get("link", "")
+
+    # Original title: pipeline uses "title"
+    if not normalized.get("original_title"):
+        normalized["original_title"] = article.get("title", "")
+
+    # Source name: pipeline may store it the same way, but double-check
+    if not normalized.get("source_name"):
+        normalized["source_name"] = article.get("source_name", "")
+
+    return normalized
+
+
+# =============================================================================
 # Article Picker (simplified, from all_articles)
 # =============================================================================
 
@@ -111,18 +160,20 @@ def pick_article(db: Client, target_date: date, articles_from_pipeline: list = N
         # Check for AI-flagged article
         for article in articles_from_pipeline:
             if article.get("_linkedin_pick"):
-                headline = article.get("headline") or article.get("original_title", "")
+                normalized = normalize_article(article)
+                headline = normalized.get("headline") or normalized.get("original_title", "")
                 print(f"   [PICKER] AI-flagged article: {headline[:60]}")
-                return article
+                return normalized
 
         print(f"   [PICKER] No AI flag found in pipeline articles, using score fallback")
         # Fallback: score pipeline articles
         scored = [(score_article_from_pipeline(a), a) for a in articles_from_pipeline]
         scored.sort(key=lambda x: x[0], reverse=True)
         best_score, best_article = scored[0]
-        headline = best_article.get("headline") or best_article.get("original_title", "")
+        normalized = normalize_article(best_article)
+        headline = normalized.get("headline") or normalized.get("original_title", "")
         print(f"   [PICKER] Score fallback: {headline[:60]} (score: {best_score})")
-        return best_article
+        return normalized
 
     # Option B: Query Supabase (standalone run)
     try:
@@ -184,9 +235,12 @@ def score_article_from_pipeline(article: Dict[str, Any]) -> int:
     """Score a pipeline article (has image dict instead of r2_image_path)."""
     score = 0
 
-    # Has image
+    # Has image -- check both pipeline formats
+    hero_image = article.get("hero_image")
     image_info = article.get("image", {})
-    if image_info and image_info.get("has_image"):
+    if hero_image and hero_image.get("r2_url"):
+        score += 3
+    elif image_info and image_info.get("has_image"):
         score += 3
 
     # Category
@@ -283,7 +337,8 @@ async def generate_context_sentence(article: Dict[str, Any]) -> str:
         sentence = response.content.strip().strip('"').strip("'")
 
         # Validate: should be one sentence, reasonable length
-        if len(sentence) < 20 or len(sentence) > 200:
+        # Allow up to 300 chars -- good context sentences can be 200-280 chars
+        if len(sentence) < 20 or len(sentence) > 300:
             print(f"   [CONTEXT] AI output bad length ({len(sentence)}), using fallback")
             return _fallback_context(summary)
 
@@ -308,6 +363,7 @@ def _load_context_prompt() -> str:
 
     for path in possible_paths:
         if path.exists():
+            print(f"   [CONTEXT] Loaded prompt from {path}")
             return path.read_text(encoding="utf-8")
 
     print("[CONTEXT] Warning: prompt file not found, using inline fallback")
@@ -336,7 +392,10 @@ def _fallback_context(summary: str) -> str:
     sentences = re.split(r'(?<=[.!?])\s+', summary.strip())
     if sentences:
         first = sentences[0].strip()
-        if not first.endswith("."):
+        # Truncate if too long (keep it concise for LinkedIn format)
+        if len(first) > 250:
+            first = first[:247] + "..."
+        if not first.endswith((".", "...", "!", "?")):
             first += "."
         return first
     return summary.strip()
@@ -368,14 +427,14 @@ def format_category_line(article: Dict[str, Any]) -> str:
         Residential / New York.
         Award / International.
     """
-    # Category: use selection_category, capitalize
+    # Category: use selection_category (already normalized)
     category = (article.get("selection_category") or "").strip()
     if category:
         category = category.capitalize()
     else:
         category = "Architecture"
 
-    # Location: extract country or use full location
+    # Location (already normalized)
     location = (article.get("extracted_location") or "").strip()
 
     if category and location:
@@ -442,12 +501,91 @@ def format_linkedin_post(
     return "\n".join(parts)
 
 
+def _escape_html(text: str) -> str:
+    """Escape HTML special characters for Telegram HTML mode."""
+    if not text:
+        return ""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def format_telegram_message(
+    article: Dict[str, Any],
+    context_sentence: str,
+    edition_type: str,
+) -> str:
+    """
+    Format the Telegram message with HTML bold headline.
+
+    Same structure as the LinkedIn post, but with <b> tags on the headline
+    so it stands out visually in the Telegram DM.
+    """
+    headline = article.get("headline") or article.get("original_title", "")
+    source_name = article.get("source_name", "")
+    category_line = format_category_line(article)
+    edition_label = EDITION_LABELS.get(edition_type, "daily")
+
+    parts = []
+
+    # 1. Headline (bold in Telegram)
+    parts.append(f"<b>{_escape_html(headline)}</b>")
+    parts.append("")
+
+    # 2. Category / Location
+    if category_line:
+        parts.append(_escape_html(category_line))
+        parts.append("")
+
+    # 3. Context sentence
+    if context_sentence:
+        parts.append(_escape_html(context_sentence))
+        parts.append("")
+
+    # 4. Source name
+    if source_name:
+        parts.append(_escape_html(source_name))
+        parts.append("")
+
+    # 5. Branding footer
+    parts.append("a/d/u -- curated for professionals")
+    parts.append(f"{edition_label} selection:")
+    parts.append("adu.media")
+
+    return "\n".join(parts)
+
+
 # =============================================================================
 # Image URL Helper
 # =============================================================================
 
 def get_image_url(article: Dict[str, Any]) -> Optional[str]:
-    """Get the public image URL for the article."""
+    """
+    Get the public image URL for the article.
+
+    Handles both pipeline articles (hero_image dict) and
+    Supabase articles (r2_image_path string).
+    """
+    # Option A: Pipeline article with hero_image dict (already a full URL)
+    hero_image = article.get("hero_image")
+    if hero_image:
+        r2_url = hero_image.get("r2_url")
+        if r2_url and r2_url.startswith("http"):
+            return r2_url
+        # Fallback to original URL
+        original_url = hero_image.get("url")
+        if original_url and original_url.startswith("http"):
+            return original_url
+
+    # Option B: Pipeline article with image dict
+    image_info = article.get("image", {})
+    if image_info:
+        r2_path = image_info.get("r2_path")
+        if r2_path:
+            public_url = os.getenv("R2_PUBLIC_URL")
+            if public_url:
+                clean_path = r2_path.lstrip("/")
+                return f"{public_url.rstrip('/')}/{clean_path}"
+
+    # Option C: Supabase article with r2_image_path string
     r2_image_path = article.get("r2_image_path")
     if not r2_image_path:
         return None
@@ -467,14 +605,14 @@ def get_image_url(article: Dict[str, Any]) -> Optional[str]:
 
 async def send_to_admin(
     bot_token: str,
-    post_text: str,
+    telegram_text: str,
     image_url: Optional[str] = None,
 ) -> bool:
     """
     Send the formatted LinkedIn post to the admin via Telegram DM.
 
-    Sends image first (if available), then the text as a separate message
-    so the admin can easily copy the text.
+    Sends image first (if available), then the text with HTML formatting
+    (bold headline) as a separate message so admin can see the structure.
     """
     bot = Bot(token=bot_token)
 
@@ -482,18 +620,23 @@ async def send_to_admin(
         # Send image first if available
         if image_url:
             print(f"   [SEND] Sending image to admin...")
-            await bot.send_photo(
-                chat_id=ADMIN_USER_ID,
-                photo=image_url,
-            )
+            try:
+                await bot.send_photo(
+                    chat_id=ADMIN_USER_ID,
+                    photo=image_url,
+                )
+            except Exception as img_err:
+                print(f"   [SEND] Image send failed: {img_err}")
+                # Continue -- still send the text
             # Small delay between messages
             await asyncio.sleep(1)
 
-        # Send text as plain message (no HTML/Markdown so admin can copy-paste)
+        # Send text with HTML formatting (bold headline)
         print(f"   [SEND] Sending post text to admin...")
         await bot.send_message(
             chat_id=ADMIN_USER_ID,
-            text=post_text,
+            text=telegram_text,
+            parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
         )
 
@@ -509,6 +652,15 @@ async def send_to_admin(
 # Record in linkedin_posts Table
 # =============================================================================
 
+def _is_valid_uuid(value: str) -> bool:
+    """Check if a string is a valid UUID."""
+    try:
+        uuid.UUID(str(value))
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
 def record_linkedin_post(
     db: Client,
     article: Dict[str, Any],
@@ -517,9 +669,16 @@ def record_linkedin_post(
 ) -> None:
     """Record the LinkedIn post in Supabase for tracking."""
     try:
+        # Get article_id -- only use if it's a valid UUID
+        # Pipeline articles have non-UUID IDs like "metalocus_001"
+        article_id = article.get("id")
+        if article_id and not _is_valid_uuid(article_id):
+            print(f"   [RECORD] Article ID '{article_id}' is not a UUID, setting to null")
+            article_id = None
+
         data = {
-            "article_id": article.get("id"),
-            "article_url": article.get("article_url", ""),
+            "article_id": article_id,
+            "article_url": article.get("article_url") or article.get("link", ""),
             "adu_media_url": article.get("adu_media_url"),
             "linkedin_post_urn": None,  # Not posted to LinkedIn yet
             "post_text": post_text[:2000],
@@ -555,7 +714,7 @@ async def run(target_date: Optional[date] = None, dry_run: bool = False, article
     Main pipeline:
     1. Pick best article from today's digest
     2. Generate context sentence (AI)
-    3. Format LinkedIn post
+    3. Format LinkedIn post (plain) + Telegram message (HTML bold headline)
     4. Send image + text to admin via Telegram
     5. Record in linkedin_posts table
     """
@@ -591,10 +750,13 @@ async def run(target_date: Optional[date] = None, dry_run: bool = False, article
     # Step 2: Generate context sentence
     context_sentence = await generate_context_sentence(article)
 
-    # Step 3: Format post
+    # Step 3a: Format plain-text LinkedIn post (for recording / copy-paste)
     post_text = format_linkedin_post(article, context_sentence, edition_type)
 
-    # Step 4: Get image URL
+    # Step 3b: Format Telegram message with HTML bold headline
+    telegram_text = format_telegram_message(article, context_sentence, edition_type)
+
+    # Step 4: Get image URL (handles both pipeline and Supabase articles)
     image_url = get_image_url(article)
 
     # Print preview
@@ -619,10 +781,10 @@ async def run(target_date: Optional[date] = None, dry_run: bool = False, article
         print("[ERROR] TELEGRAM_BOT_TOKEN required")
         return
 
-    success = await send_to_admin(bot_token, post_text, image_url)
+    success = await send_to_admin(bot_token, telegram_text, image_url)
 
     if success:
-        # Step 6: Record in linkedin_posts
+        # Step 6: Record in linkedin_posts (plain text version, not HTML)
         record_linkedin_post(db, article, post_text, status="sent_to_admin")
         print("\n[DONE] LinkedIn post sent to admin and recorded.")
     else:
