@@ -80,3 +80,4 @@ Return ONLY a valid JSON object with exactly this structure:
 - Categories must be exactly one of: project, news, interview, competition, award, opinion
 - Your selection directly impacts what thousands of architecture professionals see today
 - Quality over recency when both are strong candidates
+- Each article ID must appear EXACTLY ONCE in the "selected" list. Never select the same article twice.

@@ -85,3 +85,4 @@ Return ONLY a valid JSON object with exactly this structure:
 - Do NOT use any emoji in your output
 - Try to balance coverage across all four days (Fri/Sat/Sun/Mon)
 - Categories must be exactly one of: project, news, interview, competition, award, opinion
+- Each article ID must appear EXACTLY ONCE in the "selected" list. Never select the same article twice.
