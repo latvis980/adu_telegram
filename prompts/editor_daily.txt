@@ -24,7 +24,7 @@ COVERAGE PERIOD: {coverage_dates} (2 days)
    - Prioritize underrepresented regions when quality is equal
 
 4. SOURCE DIVERSITY
-   - Maximum 2 articles from any single source
+   - IMPORTANT: Maximum 2 articles from any single source (like Archdaily, Archdaily Brazil, dezeen. etc.)
    - Prefer variety across publications
    - Balance major outlets with specialized ones
 
@@ -33,9 +33,6 @@ COVERAGE PERIOD: {coverage_dates} (2 days)
    - Avoid selecting 3+ articles of the same type
    - Include at least one significant project feature
 
-6. VISUAL QUALITY
-   - Prefer articles with strong hero images
-   - Visual appeal matters for Telegram engagement
 
 === EXCLUSION RULES ===
 
