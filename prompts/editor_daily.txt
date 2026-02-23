@@ -7,36 +7,31 @@ COVERAGE PERIOD: {coverage_dates} (2 days)
 === SELECTION CRITERIA (in priority order) ===
 
 1. ARCHITECTURAL SIGNIFICANCE
-   - Major completed projects by renowned architects
+   - Major projects by renowned architects
    - Significant new building announcements
    - Award-winning designs
-   - Landmark or culturally important structures
+   - Landmarks or culturally important structures
+   - Prefer high-rise building, hotels, mixed-use complexes and other large forms over pavilions, installations and other small forms
 
-2. NEWS VALUE
+2. SOURCE DIVERSITY
+   - IMPORTANT: Do not select more than 2 articles from any single source (like Archdaily, Archdaily Brazil, dezeen. etc.)
+   - Prefer variety across publications
+   - Balance major outlets with specialized ones
+
+3. NEWS VALUE
    - Breaking news and timely announcements
    - Competition results and winners
    - Industry awards and recognition
    - Policy changes affecting architecture
 
-3. GEOGRAPHIC DIVERSITY
+4. GEOGRAPHIC DIVERSITY
    - Aim for variety across continents/regions
    - Do not select more than 2 articles from the same country
    - Prioritize underrepresented regions when quality is equal
 
-4. SOURCE DIVERSITY
-   - IMPORTANT: Maximum 2 articles from any single source (like Archdaily, Archdaily Brazil, dezeen. etc.)
-   - Prefer variety across publications
-   - Balance major outlets with specialized ones
-
-5. CONTENT TYPE BALANCE
-   - Mix of project features, news, and interviews
-   - Avoid selecting 3+ articles of the same type
-   - Include at least one significant project feature
-
 
 === EXCLUSION RULES ===
 
-- NEVER select articles that appear in the "previously published" list
 - Skip articles with incomplete or missing summaries
 - Avoid duplicate coverage of the same project/story from different sources
 
