@@ -895,6 +895,22 @@ Match if: confidence >= 0.75"""
         duplicates = []
         updates = []
 
+        # Remove URL duplicates within the candidate batch itself
+        # (same article can be scraped on multiple days into different R2 paths)
+        seen_urls: set = set()
+        deduped_candidates = []
+        for c in candidates:
+            url = c.get("link", "").lower().strip().rstrip("/")
+            if url and url in seen_urls:
+                print(f"   ⚠️ [DEDUP] Skipping intra-batch duplicate URL: {url[:80]}")
+                continue
+            if url:
+                seen_urls.add(url)
+            deduped_candidates.append(c)
+        if len(deduped_candidates) < len(candidates):
+            print(f"   ℹ️ [DEDUP] Removed {len(candidates) - len(deduped_candidates)} URL duplicate(s) from candidate batch")
+        candidates = deduped_candidates
+
         print(f"\n📊 [DEDUP] Filtering {len(candidates)} candidates against published topics...")
 
         # Process in smaller batches to show progress
