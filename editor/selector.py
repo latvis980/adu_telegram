@@ -305,9 +305,19 @@ class ArticleSelector:
                 else:
                     self.rate_limiter.record_usage(estimated_tokens)
 
-            # Parse response
             result = json.loads(response.content)
             selection = EditorSelection(**result)
+
+            # Safety check: deduplicate AI selection by article ID
+            seen_ids: set = set()
+            unique_selected = []
+            for article in selection.selected:
+                if article.id in seen_ids:
+                    print(f"   ⚠️ [EDITOR] AI selected duplicate ID '{article.id}', removing second occurrence")
+                else:
+                    seen_ids.add(article.id)
+                    unique_selected.append(article)
+            selection.selected = unique_selected
 
             print(f"   [OK] Selected {len(selection.selected)} articles")
             print(f"   Summary: {selection.edition_summary}")
@@ -382,6 +392,17 @@ class ArticleSelector:
 
             result = json.loads(response.content)
             selection = EditorSelection(**result)
+
+            # Safety check: deduplicate AI selection by article ID
+            seen_ids: set = set()
+            unique_selected = []
+            for article in selection.selected:
+                if article.id in seen_ids:
+                    print(f"   ⚠️ [EDITOR] AI selected duplicate ID '{article.id}', removing second occurrence")
+                else:
+                    seen_ids.add(article.id)
+                    unique_selected.append(article)
+            selection.selected = unique_selected
 
             print(f"   [OK] Selected {len(selection.selected)} articles")
             print(f"   Summary: {selection.edition_summary}")
