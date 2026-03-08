@@ -256,14 +256,22 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
     prepared = []
 
     for article in articles:
+        # Build combined headline from new two-line format
+        line1 = article.get("headline_line_1", "")
+        line2 = article.get("headline_line_2", "")
+        # Fallback: if old single "headline" field exists, use it
+        combined_headline = f"{line1} / {line2}" if (line1 and line2) else article.get("headline", line1 or "")
+
         telegram_article = {
             "id": article.get("id", ""),
             "title": article.get("title", ""),
-            "headline": article.get("headline", ""),
-            "tag": article.get("tag", ""),
+            "headline": combined_headline,                    # Combined for DB/URL building
+            "headline_line_1": line1,                         # NEW: first line of header
+            "headline_line_2": line2,                         # NEW: second line of header
+            "is_studio": article.get("is_studio", False),     # NEW: studio flag
+            "tags": article.get("tags", []),                  # Now always a list (was also "tag" before)
             "link": article.get("link", ""),
             "ai_summary": article.get("ai_summary", ""),
-            "tags": article.get("tags", []),
             "source_id": article.get("source_id", ""),
             "source_name": article.get("source_name", article.get("source_id", "Unknown")),
             "published": article.get("published"),
@@ -271,8 +279,11 @@ def prepare_articles_for_telegram(articles: List[Dict[str, Any]], r2: R2Storage)
             "_extracted_info": article.get("_extracted_info"),
             "_selection_reason": article.get("_selection_reason"),
             "_selection_category": article.get("_selection_category"),
-            "_r2_path": article.get("_r2_path"),           # Preserve for DB recording
-            "image": article.get("image"),                  # Preserve original image dict for DB recording
+            "_r2_path": article.get("_r2_path"),
+            "image": article.get("image"),
+            # NEW: per-line translations for headline
+            "headline_line_1_translations": article.get("headline_line_1_translations", {}),
+            "headline_line_2_translations": article.get("headline_line_2_translations", {}),
         }
 
         image_info = article.get("image", {})

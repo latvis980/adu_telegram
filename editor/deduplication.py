@@ -345,17 +345,26 @@ Match if: confidence >= 0.75"""
             publish_date = date.today()
 
         data = {
-            "project_name": project_name,
-            "architect": architect,
-            "location_city": location_city,
-            "location_country": location_country,
-            "first_seen_date": publish_date.isoformat(),
-            "first_article_id": first_article_id,
-            "project_type": project_type,
-            "project_status": project_status,
-            "topic_type": topic_type,
-            "times_published": 1,
-            "last_published_date": publish_date.isoformat(),
+            "article_url": url,
+            "source_id": article.get("source_id", "unknown"),
+            "source_name": article.get("source_name", ""),
+            "original_title": article.get("title", ""),
+            "original_publish_date": article.get("published"),
+            "ai_summary": article.get("ai_summary", ""),
+            "tags": article.get("tags", []),
+            "r2_path": article.get("_r2_path"),
+            "r2_image_path": article.get("image", {}).get("r2_path") if article.get("image") else None,
+            "r2_thumbnail_path": article.get("image", {}).get("r2_thumbnail_path") if article.get("image") else None,
+            "fetch_date": article.get("_fetch_date", date.today().isoformat()),
+            "status": status,
+            "project_id": project_id,
+            "headline": headline or None,
+            "headline_line_1": article.get("headline_line_1") or None,
+            "headline_line_2": article.get("headline_line_2") or None,
+            "is_studio": article.get("is_studio", False),
+            "headline_line_1_translations": article.get("headline_line_1_translations") or None,
+            "headline_line_2_translations": article.get("headline_line_2_translations") or None,
+            "adu_media_url": adu_media_url,
         }
 
         try:

@@ -506,48 +506,69 @@ class TelegramBot:
         """
         Format single article message in HTML.
 
-        Format:
-        <b>PROJECT NAME / ARCHITECT</b>
+        New format (two-line header):
+            [custom emoji line if is_studio]
 
-        Two-sentence summary
+            <b>PROJECT NAME / ARCHITECT</b>
 
-        #tag
+            <b>Typology / Location</b>
 
-        Source Name (as link)
+            Two-sentence summary
+
+            #tag1 #tag2
+
+            Source Name (as link)
         """
         url = article.get("link", "")
-        headline = article.get("headline", "")
+        line1 = article.get("headline_line_1", "")
+        line2 = article.get("headline_line_2", "")
         summary = article.get("ai_summary", "No summary available.")
-        tag = article.get("tag", "")
+        tags = article.get("tags", [])
+        is_studio = article.get("is_studio", False)
+
+        # Fallback: if new two-line fields are empty, use combined headline
+        if not line1:
+            line1 = article.get("headline", "")
 
         source_name = get_source_name(url)
 
         message_parts = []
 
-        # 1. Bold headline (PROJECT NAME / ARCHITECT)
-        if headline:
-            message_parts.append(f"<b>{headline}</b>")
+        # 0. Custom emoji line for studio articles (placeholder for now)
+        # TODO: Add custom emoji via <tg-emoji> once sticker is uploaded
+        if is_studio:
+            message_parts.append("Studio Update")
+            message_parts.append("")  # Empty line after emoji/label
+
+        # 1. Bold headline line 1 (PROJECT NAME / ARCHITECT)
+        if line1:
+            message_parts.append(f"<b>{line1}</b>")
+            message_parts.append("")  # Empty line between headline lines
+
+        # 2. Bold headline line 2 (Typology / Location)
+        if line2:
+            message_parts.append(f"<b>{line2}</b>")
             message_parts.append("")  # Empty line after headline
 
-        # 2. Summary (plain text)
+        # 3. Summary (plain text)
         message_parts.append(summary)
         message_parts.append("")  # Empty line after summary
 
-        # 3. Tag (exactly one)
-        if tag:
-            # Clean tag: lowercase, replace spaces with underscores, remove special chars
+        # 4. Tags (up to 2)
+        tag_strings = []
+        for tag in tags[:2]:  # Limit to 2 tags
             clean_tag = tag.strip().lower().replace(" ", "_")
             clean_tag = re.sub(r'[^a-z0-9_]', '', clean_tag)
             if clean_tag:
-                message_parts.append(f"#{clean_tag}")
-                message_parts.append("")  # Empty line after tag
+                tag_strings.append(f"#{clean_tag}")
+        if tag_strings:
+            message_parts.append(" ".join(tag_strings))
+            message_parts.append("")  # Empty line after tags
 
-        # 4. Source link
+        # 5. Source link
         if url:
-            # HTML link format: <a href="URL">Source Name</a>
-            message_parts.append(f'<u><a href="{url}">{source_name}</a></u>')
+            message_parts.append(f'<a href="{url}">{source_name}</a>')
 
-        # Join with single newlines (empty strings create the blank lines)
         return "\n".join(message_parts)
 
     # =========================================================================
