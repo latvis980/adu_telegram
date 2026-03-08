@@ -483,7 +483,7 @@ def determine_edition_type(target_date: Optional[date] = None) -> Optional[Editi
     elif weekday in [1, 2, 3, 4]:     # Tue, Wed, Thu, Fri
         return EditionType.DAILY
     else:                              # Saturday, Sunday
-        return EditionType.DAILY # change to return None after the test
+        return None
 
 
 def get_edition_display_name(edition_type: EditionType) -> str:
