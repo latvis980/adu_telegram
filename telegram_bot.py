@@ -530,7 +530,7 @@ class TelegramBot:
         if not line1:
             line1 = article.get("headline", "")
 
-        source_name = get_source_name(url)
+        source_name = article.get("source_name") or get_source_name(url)
 
         message_parts = []
 
