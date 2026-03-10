@@ -537,7 +537,7 @@ class TelegramBot:
         # 0. Custom emoji line for studio articles (placeholder for now)
         # TODO: Add custom emoji via <tg-emoji> once sticker is uploaded
         if is_studio:
-            message_parts.append("<i>Studio Update</i>")
+            message_parts.append("<u>studio update</u>")
             message_parts.append("")  # Empty line after emoji/label
 
         # 1. Bold headline line 1 (PROJECT NAME / ARCHITECT)
