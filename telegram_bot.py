@@ -547,7 +547,7 @@ class TelegramBot:
 
         # 2. Bold headline line 2 (Typology / Location)
         if line2:
-            message_parts.append(f"<b>{line2}</b>")
+            message_parts.append(f"<i>{line2}</i>")
             message_parts.append("")  # Empty line after headline
 
         # 3. Summary (plain text)
