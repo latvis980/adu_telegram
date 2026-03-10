@@ -734,7 +734,7 @@ Match if: confidence >= 0.75"""
             pass
 
         # Build adu.media URL from headline
-        headline = article.get("headline", "")
+        headline = article.get("headline_line_1") or article.get("headline", "")
         adu_media_url = None
         if headline:
              adu_media_url = self._build_adu_media_url(
